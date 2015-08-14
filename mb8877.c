@@ -20,6 +20,7 @@ References
 #define SD_DEBUG
 
 #include "mb8877.h"
+#include "crc.h"
 
 #include <SD.h>
 #include <SdFat.h>
