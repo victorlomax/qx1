@@ -19,7 +19,7 @@ References
 #define DEBUG
 #define SD_DEBUG
 
-#include "QX1.mb8877.h"
+#include "mb8877.h"
 
 #include <SD.h>
 #include <SdFat.h>
