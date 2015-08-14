@@ -336,9 +336,9 @@ void	MB8877::decode_command()
 		case 0xa0: cmd_writedata(FDC_CMD_WR_SEC); break;
 		case 0xb0: cmd_writedata(FDC_CMD_WR_MSEC); break;
 	// type III
-		case 0xc0: cmd_readaddr(); break;
-		case 0xe0: cmd_readtrack(); break;
-		case 0xf0: cmd_writetrack(); break;
+		case 0xc0: cmd_readaddr(FDC_CMD_RD_ADDR); break;
+		case 0xe0: cmd_readtrack(FDC_CMD_RD_TRK); break;
+		case 0xf0: cmd_writetrack(FDC_CMD_WR_TRK); break;
 	// type IV
 		case 0xd0: cmd_forceint(); break;
 		default: break;
@@ -521,7 +521,7 @@ PLUG HERE THE BEHAVIOR IF DATA ADDRESS MARK ON DISK (first byte) IS SET TO DELET
 // ----------------------------------------------------------------------------
 // Type II command: WRITE-DATA
 // ----------------------------------------------------------------------------
-void MB8877::cmd_writedata(byte multiple)
+void MB8877::cmd_writedata(int cmd)
 {
 	int16_t	byte,		// the byte to serve
 		blocksize,	// # bytes / sector
@@ -531,16 +531,10 @@ void MB8877::cmd_writedata(byte multiple)
 #endif
 
 	// Calculate the number of sectors we will have to write
-	if (multiple)
-	{
-		fdc.cmdtype = FDC_CMD_WR_MSEC;
+	nsectors = 1;
+	if (fdc.cmdtype == FDC_CMD_WR_MSEC)
 		nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1) - fdc.reg[SECTOR];
-	}
-	else
-	{
-		fdc.cmdtype = FDC_CMD_WR_SEC;
-		nsectors = 1;
-	}
+	
 	blocksize = (fdc.track<80) ? FDC_SIZE_SECTOR_0 : FDC_SIZE_SECTOR_1;
 
 	fdc.reg[STATUS] = FDC_ST_BUSY|FDC_ST_HEADENG;
