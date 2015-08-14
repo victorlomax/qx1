@@ -512,12 +512,19 @@ PLUG HERE THE BEHAVIOR IF DATA ADDRESS MARK ON DISK (first byte) IS SET TO DELET
 			if (fdc.cmdtype == FDC_CMD_RD_TRK) crc.compute(fdc.reg[DATA]);
 			send_qx1(fdc.reg[DATA]);
 		}
-		if (fdc.cmdtype == FDC_CMD_RD_TRK)
+		if (byte==-1)						// End Of Data
+			fdc.reg[STATUS] &= FDC_ST_RECNFND;		// Set RECNFND
+		else
 		{
-			send_qx1(crc.msb());
-			send_qx1(crc.lsb());
+			if (fdc.cmdtype == FDC_CMD_RD_TRK)		// We read to extra bytes (CRC)
+			{
+				crc.checkmsb(sd.read());
+				crc.checklsb(sd.read());
+				send_qx1(crc.msb());
+				send_qx1(crc.lsb());
+			}
+			crc.reset();
 		}
-		crc.reset();
 }
 
 // ----------------------------------------------------------------------------
