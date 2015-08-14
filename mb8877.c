@@ -3,19 +3,39 @@
 
 	Francois Basquin, 2014 mar 20
 
-	Origin : mb8877a from RetroPC ver 2006.12.06 by Takeda.Toshiya
+References
+	Arduino Mini: http://arduino.cc/en/Main/ArduinoBoardMini
+	SD library: http://www.roland-riegel.de/sd-reader/index.html
+	MicroFAT: http://arduinonut.blogspot.ca/2008/04/ufat.html
+	mb8877a: from RetroPC ver 2006.12.06 by Takeda.Toshiya, http://homepage3.nifty.com/takeda-toshiya/
 */
 
-#include "mb8877.h"
-#include "../config.h"
-// SD Card management
-#include "SD.h"
+// ----------------------------------------------------------------------------
+// Includes and defines
+// ----------------------------------------------------------------------------
 
-#define FDC_FRM_MAXTRACK	160
+// #define _MICROFAT
+
+#define DEBUG
+#define SD_DEBUG
+
+#include "QX1.mb8877.h"
+
+#include <SD.h>
+#include <SdFat.h>
+
+#include "../config.h"
+
+
+// ----- Definition of interrupt names
+#include <avr/io.h>
+// ----- ISR interrupt service routine
+#include <avr/interrupt.h>
+
 #define FDC_FRM_MAXSECTOR	9
 #define FDC_FRM_BLOCKSIZE	512
 
-// Events
+// ----- Events
 #define EVENT_SEEK		0
 #define EVENT_SEEKEND		1
 #define EVENT_SEARCH		2
@@ -24,731 +44,662 @@
 #define EVENT_MULTI2		5
 #define EVENT_LOST		6
 
+#define PORT_INPUT	0x00
+#define PORT_OUTPUT	0xff
 
-// Delay table: 6msec, 12msec, 20msec, 30msec
-static const int delays[4] = {6000, 12000, 20000, 30000};
+// ----------------------------------------------------------------------------
+// Vars and consts
+// ----------------------------------------------------------------------------
 
-#define CANCEL_EVENT(event) { \
-	if(register_id[event] != -1) { \
-		cancel_event(register_id[event]); \
-		register_id[event] = -1; \
-	} \
-	if(event == EVENT_SEEK) { \
-		now_seek = false; \
-	} \
-	if(event == EVENT_SEARCH) { \
-		now_search = false; \
-	} \
-}
-#define REGISTER_EVENT(event, wait) { \
-	if(register_id[event] != -1) { \
-		cancel_event(register_id[event]); \
-		register_id[event] = -1; \
-	} \
-	register_event(this, (event << 8) | cmdtype, wait, false, &register_id[event]); \
-	if(event == EVENT_SEEK) { \
-		now_seek = after_seek = true; \
-	} \
-	if(event == EVENT_SEARCH) { \
-		now_search = true; \
-	} \
-}
+// ----- Delay table: 6msec, 12msec, 20msec, 30msec
+static const int delays[4] = {600, 1200, 2000, 3000};
 
-int	fd;		// SD card file descriptor
+Sd2Card  card;
+SdVolume volume;
+SdFile   root;
+File     diroot;
+dir_t	 direntry;
+
+// This variable will get data from the QX1 data bus
+volatile unsigned char qx1bus;
+
+int incomingByte = 0;   // for incoming serial data
+int   ndisk=0;            // Number of virtual-disks on SD
+int   lock=false;
+int   side=0,
+      track=0,
+      sector=0;
+
 char	filename[8];	// SD card filename
 
-void fdc_initialize()
+// ----------------------------------------------------------------------------
+// DECLARE FUNCTION
+// ----------------------------------------------------------------------------
+void readsector();	
+
+// ----------------------------------------------------------------------------
+// DEBUG
+// ----------------------------------------------------------------------------
+
+#ifdef FDC_DEBUG
+void display(char *command)
 {
-  // ignore_crc = config.ignore_crc;
-  dbaddr=0;
-  seektrk = 0;
-  fdc.vector = FDC_SEEK_FORWARD;
-  indexcnt = sectorcnt = 0;
-  registers[TRACK] = registers[STATUS] = registers[CMD] = registers[SECTOR] = registers[DATA] = registers[SIDE] = 0
-  fdc.cmdtype = 0;
+	const char *cmdstr[0x10] = {
+		"  I Seek track 0",
+		"  I Seek",
+		"  I Step",
+		"  I Step",
+		"  I Step In",
+		"  I Step In",
+		"  I Step Out",
+		"  I Step Out",
+		" II Read One Sector",
+		" II Read Multiple Sector",
+		" II Write One Sector",
+		" II Write Multiple Sector",
+		"III Read Address",
+		" IV Force interrupt ",
+		"III Read Track",
+		"III Write Track"};
+
+	Serial.println("%s\tRegisters\tCMD=%2xh (%s) DATA=%2xh TRK=%3d SEC=%2d", command,
+		fdc.reg[CMD],
+		cmdstr[fdc.reg[CMD] >> 4],
+		fdc.reg[DATA],
+		fdc.reg[TRACK],
+		fdc.reg[SECTOR]);
+
+	Serial.println("Status register");
+	Serial.println("[%c] Not ready", !(fdc.reg[STATUS] & 0x80) ? 'X' : ' ');
+	Serial.println("[%c] Write protected", !(fdc.reg[STATUS] & 0x40) ? 'X' : ' ');
+	Serial.println("[%c] Head loaded", !(fdc.reg[STATUS] & 0x20) ? 'X' : ' ');
+	Serial.println("[%c] Seek error", !(fdc.reg[STATUS] & 0x10) ? 'X' : ' ');
+	Serial.println("[%c] CRC error", !(fdc.reg[STATUS] & 0x08) ? 'X' : ' ');
+	Serial.println("[%c] Track 0", !(fdc.reg[STATUS] & 0x04) ? 'X' : ' ');
+	Serial.println("[%c] Index hole", !(fdc.reg[STATUS] & 0x02) ? 'X' : ' ');
+	Serial.println("[%c] Busy", !(fdc.reg[STATUS] & 0x01) ? 'X' : ' ');
+ 
+	Serial.println("Disk\tTRACK=%d DSK=%d SIDE=%d", fdc.track, fdc.disk, fdc.side);
 }
+#endif
 
-void mb8877_reset()
-{
-	fdc.track = 0;
-	fdc.index = 0;
-	fdc.access = false;
+// ----------------------------------------------------------------------------
+// Interrupt Management
+// ----------------------------------------------------------------------------
+volatile int Interrupt = false;	// When QX1 pin /RD goes low, Interrupt goes true
 
-	for(int i = 0; i < 7; i++) {
-		register_id[i] = -1;
-	}
-	now_search = now_seek = after_seek = false;
-}
-
-void MB8877::update_config()
-{
-	ignore_crc = config.ignore_crc;
+void CatchWriteInterrupt(INT0_vect) {
+	// check the value again - since it takes some time to
+	// activate the interrupt routine, we get a clear signal.
+	qx1bus = digitalRead(sensePin);
+	Interrupt=true;
 }
 
 // ----------------------------------------------------------------------------
-// Write data to a given register
-// parameters: addr=register, data=data to write
-// returns: nothing
+// Arduino setup routine
 // ----------------------------------------------------------------------------
-void MB8877::write_register(uchar addr, char data)
+
+void setup() {
+	Serial.begin(9600);
+	Serial.println("00 FDC init..");
+
+	fdc.vector = FDC_SEEK_FORWARD;
+	fdc.reg[TRACK] = fdc.reg[STATUS] = registers[CMD] = registers[SECTOR] = registers[DATA] = 0;
+	fdc.disk = -1;
+	fdc.track = fdc.side = fdc.cmdtype = 0;
+
+	// ----- Set ports
+	// Port D is the bus; input or output
+	// Port C:0-1 drive the 74139 to manage the digital bus; always outputs
+	// Port C:2-3 drive the interrupts; always outputs
+
+	DDRD = PORT_INPUT;	// Set port D as input
+	DDRC |= 0x0f;		// Set port C (0-3) as output
+	qx1bus=0;		// no data on QX1 bus
+
+	Serial.println("01 Card init..");
+
+	pinMode(SD_CHIP_SELECT_PIN, OUTPUT);
+	digitalWrite(SD_CHIP_SELECT_PIN, HIGH);   // Activate Pullup resistor
+
+	scanSD();			// If SD card is present ...
+	scanDirectory(fdc.disk);	// ... scan the directory
+}
+
+void loop()
 {
-	switch(addr & 3) {
-	case FDC_REG_CMD:			// command reg
-		cmdreg = data;
-		process_cmd();
-		break;
-	case FDC_REG_TRACK:			// track reg
-		trkreg = data;
-		if((status & FDC_ST_BUSY) && (fdc[drvreg].index == 0)) {
-			// track reg is written after command starts
-			if(cmdtype == FDC_CMD_RD_SEC || cmdtype == FDC_CMD_RD_MSEC || cmdtype == FDC_CMD_WR_SEC || cmdtype == FDC_CMD_WR_MSEC) {
-				process_cmd();
-			}
+	if (Serial.available() > 0) {
+		// read the incoming byte:
+		incomingByte = Serial.read();
+		switch(incomingByte)
+		{
+  			case 'S': if(lock){++side&=2; Serial.print("SIDE=");Serial.println(side);} break;
+    			case 'O': if(lock){Serial.println("OPEN");} break;
+			case '+': if(!lock){Serial.println(">"); disk = scanDirectory(disk + 1);}
+                                  else {track++; Serial.print("TRACK=");Serial.println(track);} break;
+			case '-': if(!lock){Serial.println("<"); disk = scanDirectory(disk - 1);} break;
+			case '0': if(!lock){Serial.println("<<"); disk = scanDirectory(0);} break;
+			case '.': if(!lock){Serial.println(">>"); disk = scanDirectory(999);} break;
+			case ' ': lock=!lock; break;
 		}
-		break;
-	case FDC_REG_SECTOR:			// sector reg
-		secreg = data;
-		if((status & FDC_ST_BUSY) && (fdc[drvreg].index == 0)) {
-			// sector reg is written after command starts
-			if(cmdtype == FDC_CMD_RD_SEC || cmdtype == FDC_CMD_RD_MSEC || cmdtype == FDC_CMD_WR_SEC || cmdtype == FDC_CMD_WR_MSEC) {
-				process_cmd();
-			}
-		}
-		break;
-	case FDC_REG_DATA:			// data reg
-		datareg = data;
-		if(motor && (status & FDC_ST_DRQ) && !now_search) {
-			if(cmdtype == FDC_CMD_WR_SEC || cmdtype == FDC_CMD_WR_MSEC) {
-				// write or multisector write
-				if(fdc[drvreg].index < disk[drvreg]->sector_size) {
-					if(!disk[drvreg]->write_protected) {
-						disk[drvreg]->sector[fdc[drvreg].index] = datareg;
-						// dm, ddm
-						disk[drvreg]->deleted = (cmdreg & 1) ? 0x10 : 0;
-					}
-					else {
-						status |= FDC_ST_WRITEFAULT;
-						status &= ~FDC_ST_BUSY;
-						status &= ~FDC_ST_DRQ;
-						cmdtype = 0;
-						set_irq(true);
-					}
-					fdc[drvreg].index++;
-				}
-				if(fdc[drvreg].index >= disk[drvreg]->sector_size) {
-					if(cmdtype == FDC_CMD_WR_SEC) {
-						// single sector
-						status &= ~FDC_ST_BUSY;
-						cmdtype = 0;
-						set_irq(true);
-					}
-					else {
-						// multisector
-						REGISTER_EVENT(EVENT_MULTI1, 30);
-						REGISTER_EVENT(EVENT_MULTI2, 60);
-					}
-					status &= ~FDC_ST_DRQ;
-				}
-				fdc[drvreg].access = true;
-			}
-			else if(cmdtype == FDC_CMD_WR_TRK) {
-				// read track
-				if(fdc[drvreg].index < disk[drvreg]->track_size) {
-					if(!disk[drvreg]->write_protected) {
-						disk[drvreg]->track[fdc[drvreg].index] = datareg;
-					}
-					else {
-						status |= FDC_ST_WRITEFAULT;
-						status &= ~FDC_ST_BUSY;
-						status &= ~FDC_ST_DRQ;
-						cmdtype = 0;
-						set_irq(true);
-					}
-					fdc[drvreg].index++;
-				}
-				if(fdc[drvreg].index >= disk[drvreg]->track_size) {
-					status &= ~FDC_ST_BUSY;
-					status &= ~FDC_ST_DRQ;
-					cmdtype = 0;
-					set_irq(true);
-				}
-				fdc[drvreg].access = true;
-			}
-			if(!(status & FDC_ST_DRQ)) {
-				set_drq(false);
-			}
-		}
-		break;
 	}
 }
 
 // ----------------------------------------------------------------------------
-// Read data from a given register
-// parameters: addr=register
-// returns: data read
+//	Scan the SD card and open the volume
+//	Set fdc.reg[STATUS] to FDC_ST_NOTREADY if no card present
 // ----------------------------------------------------------------------------
-
-uchar MB8877::read_register(uchar addr)
+void scanSD()
 {
-	uchar data;
-	
-	switch(addr & 3) {
-	case FDC_REG_STATUS:
-		// status reg
-		if(cmdtype == FDC_CMD_TYPE4) {
-			// now force interrupt
-			if(!disk[drvreg]->inserted || !motor) {
-				status = FDC_ST_NOTREADY;
-			}
-			else {
-				// MZ-2500 RELICS invites STATUS = 0
-				status = 0;
-			}
-			data = status;
-		}
-		else if(now_search) {
-			// now sector search
-			data = FDC_ST_BUSY;
-		}
-		else {
-			// disk not inserted, motor stop
-			if(!disk[drvreg]->inserted || !motor) {
-				status |= FDC_ST_NOTREADY;
-			}
-			else {
-				status &= ~FDC_ST_NOTREADY;
-			}
-			// write protected
-			if(cmdtype == FDC_CMD_TYPE1 || cmdtype == FDC_CMD_WR_SEC || cmdtype == FDC_CMD_WR_MSEC || cmdtype == FDC_CMD_WR_TRK) {
-				if(disk[drvreg]->inserted && disk[drvreg]->write_protected) {
-					status |= FDC_ST_WRITEP;
-				}
-				else {
-					status &= ~FDC_ST_WRITEP;
-				}
-			}
-			else {
-				status &= ~FDC_ST_WRITEP;
-			}
-			// track0, index hole
-			if(cmdtype == FDC_CMD_TYPE1) {
-				if(fdc[drvreg].track == 0) {
-					status |= FDC_ST_TRACK00;
-				}
-				else {
-					status &= ~FDC_ST_TRACK00;
-				}
-				if(!(status & FDC_ST_NOTREADY)) {
-					if(indexcnt == 0) {
-						status |= FDC_ST_INDEX;
-					}
-					else {
-						status &= ~FDC_ST_INDEX;
-					}
-					if(++indexcnt >= ((disk[drvreg]->sector_num == 0) ? 16 : disk[drvreg]->sector_num)) {
-						indexcnt = 0;
-					}
-				}
-			}
-			// show busy a moment
-			data = status;
-			if(cmdtype == FDC_CMD_TYPE1 && !now_seek) {
-				status &= ~FDC_ST_BUSY;
-			}
-		}
-		// reset irq/drq
-		if(!(status & FDC_ST_DRQ)) {
-			set_drq(false);
-		}
-		set_irq(false);
-#ifdef _FDC_DEBUG_LOG
-		// request cpu to output debug log
-		if(d_cpu) {
-			d_cpu->write_signal(SIG_CPU_DEBUG, 1, 1);
-		}
-		emu->out_debug(_T("FDC\tSTATUS=%2x\n"), val);
-#endif
-		return data;
-	case FDC_REG_TRACK:
-		// track reg
-		return trkreg;
-	case FDC_REG_SECTOR:
-		// sector reg
-#ifdef HAS_MB8876
-		return (~secreg) & 0xff;
-#else
-		return secreg;
-#endif
-	case FDC_REG_DATA:
-		// data reg
-		if(motor && (status & FDC_ST_DRQ) && !now_search) {
-			if(cmdtype == FDC_CMD_RD_SEC || cmdtype == FDC_CMD_RD_MSEC) {
-				// read or multisector read
-				if(fdc[drvreg].index < disk[drvreg]->sector_size) {
-					datareg = disk[drvreg]->sector[fdc[drvreg].index];
-					fdc[drvreg].index++;
-				}
-				if(fdc[drvreg].index >= disk[drvreg]->sector_size) {
-					if(cmdtype == FDC_CMD_RD_SEC) {
-						// single sector
-#ifdef _FDC_DEBUG_LOG
-						emu->out_debug(_T("FDC\tEND OF SECTOR\n"));
-#endif
-						status &= ~FDC_ST_BUSY;
-						cmdtype = 0;
-						set_irq(true);
-					}
-					else {
-						// multisector
-#ifdef _FDC_DEBUG_LOG
-						emu->out_debug(_T("FDC\tEND OF SECTOR (SEARCH NEXT)\n"));
-#endif
-						REGISTER_EVENT(EVENT_MULTI1, 30);
-						REGISTER_EVENT(EVENT_MULTI2, 60);
-					}
-					status &= ~FDC_ST_DRQ;
-				}
-				fdc[drvreg].access = true;
-			}
-			else if(cmdtype == FDC_CMD_RD_ADDR) {
-				// read address
-				if(fdc[drvreg].index < 6) {
-					datareg = disk[drvreg]->id[fdc[drvreg].index];
-					fdc[drvreg].index++;
-				}
-				if(fdc[drvreg].index >= 6) {
-					status &= ~FDC_ST_BUSY;
-					status &= ~FDC_ST_DRQ;
-					cmdtype = 0;
-					set_irq(true);
-				}
-				fdc[drvreg].access = true;
-			}
-			else if(cmdtype == FDC_CMD_RD_TRK) {
-				// read track
-				if(fdc[drvreg].index < disk[drvreg]->track_size) {
-					datareg = disk[drvreg]->track[fdc[drvreg].index];
-					fdc[drvreg].index++;
-				}
-				if(fdc[drvreg].index >= disk[drvreg]->track_size) {
-#ifdef _FDC_DEBUG_LOG
-					emu->out_debug(_T("FDC\tEND OF TRACK\n"));
-#endif
-					status &= ~FDC_ST_BUSY;
-					status &= ~FDC_ST_DRQ;
-					status |= FDC_ST_LOSTDATA;
-					cmdtype = 0;
-					set_irq(true);
-				}
-				fdc[drvreg].access = true;
-			}
-			if(!(status & FDC_ST_DRQ)) {
-				set_drq(false);
-			}
-		}
-#ifdef _FDC_DEBUG_LOG
-		emu->out_debug(_T("FDC\tDATA=%2x\n"), datareg);
-#endif
-#ifdef HAS_MB8876
-		return (~datareg) & 0xff;
-#else
-		return datareg;
-#endif
-	}
-	return 0xff;
-}
-
-void MB8877::write_dma_io8(u32 addr, u32 data)
-{
-	write_register(FDC_REG_DATA, data);
-}
-
-u32 MB8877::read_dma_io8(u32 addr)
-{
-	return read_register(FDC_REG_DATA);
-}
-
-void MB8877::write_signal(int id, u32 data, u32 mask)
-{
-	if(id == SIG_MB8877_DRIVEREG) {
-		drvreg = data & DRIVE_MASK;
-	}
-	else if(id == SIG_MB8877_SIDEREG) {
-		sidereg = (data & mask) ? 1 : 0;
-	}
-	else if(id == SIG_MB8877_MOTOR) {
-		motor = ((data & mask) != 0);
-	}
-}
-
-u32 MB8877::read_signal(int ch)
-{
-	// get access status
-	u32 stat = 0;
-	for(int i = 0; i < MAX_DRIVE; i++) {
-		if(fdc[i].access) {
-			stat |= 1 << i;
-		}
-		fdc[i].access = false;
-	}
-	return stat;
-}
-
-void mb8877_event_callback(int event_id, int err)
-{
-	int event = event_id >> 8;
-	int cmd = event_id & 0xff;
-	register_id[event] = -1;
-	
-	// cancel event if the command is finished or other command is executed
-	if(cmd != cmdtype) {
-		if(event == EVENT_SEEK) {
-			now_seek = false;
-		}
-		else if(event == EVENT_SEARCH) {
-			now_search = false;
-		}
+	if (!card.init(SPI_FULL_SPEED, SD_CHIP_SELECT_PIN))
+	{
+		Serial.print("Init failed, error:");
+		Serial.println(card.errorCode());
+		fdc.reg[STATUS] = FDC_ST_NOTREADY;
 		return;
 	}
-	
-	switch(event) {
-	case EVENT_SEEK:
-		if(seektrk > fdc[drvreg].track) {
-			fdc[drvreg].track++;
-		}
-		else if(seektrk < fdc[drvreg].track) {
-			fdc[drvreg].track--;
-		}
-		if(cmdreg & 0x10) {
-			trkreg = fdc[drvreg].track;
-		}
-		else if((cmdreg & 0xf0) == 0) {
-			trkreg--;
-		}
-		if(seektrk == fdc[drvreg].track) {
-			// auto update
-			if((cmdreg & 0x10) || ((cmdreg & 0xf0) == 0)) {
-				trkreg = fdc[drvreg].track;
-			}
-			if((cmdreg & 0xf0) == 0) {
-				datareg = 0;
-			}
-			status |= search_track();
-			now_seek = false;
-			set_irq(true);
-		}
-		else {
-			REGISTER_EVENT(EVENT_SEEK, delay[cmdreg & 3] + err);
-		}
-		break;
-	case EVENT_SEEKEND:
-		if(seektrk == fdc[drvreg].track) {
-			// auto update
-			if((cmdreg & 0x10) || ((cmdreg & 0xf0) == 0)) {
-				trkreg = fdc[drvreg].track;
-			}
-			if((cmdreg & 0xf0) == 0) {
-				datareg = 0;
-			}
-			status |= search_track();
-			now_seek = false;
-			CANCEL_EVENT(EVENT_SEEK);
-			set_irq(true);
-		}
-		break;
-	case EVENT_SEARCH:
-		now_search = false;
-		// start dma
-		if(!(status & FDC_ST_RECNFND)) {
-			status |= FDC_ST_DRQ;
-			set_drq(true);
-		}
-		break;
-	case EVENT_TYPE4:
-		cmdtype = FDC_CMD_TYPE4;
-		break;
-	case EVENT_MULTI1:
-		secreg++;
-		break;
-	case EVENT_MULTI2:
-		if(cmdtype == FDC_CMD_RD_MSEC) {
-			cmd_readdata();
-		}
-		else if(cmdtype == FDC_CMD_WR_MSEC) {
-			cmd_writedata();
-		}
-		break;
-	case EVENT_LOST:
-		if(status & FDC_ST_BUSY) {
-			status |= FDC_ST_LOSTDATA;
-			status &= ~FDC_ST_BUSY;
-			//status &= ~FDC_ST_DRQ;
-			set_irq(true);
-			//set_drq(false);
-		}
-		break;
+
+#ifdef SD_DEBUG
+	Serial.print("\nCard type: ");
+	switch(card.type()) {
+		case SD_CARD_TYPE_SD1: Serial.println("SD1"); break;
+		case SD_CARD_TYPE_SD2: Serial.println("SD2"); break;
+		case SD_CARD_TYPE_SDHC: Serial.println("SDHC"); break;
+		default: Serial.println("Unknown");
 	}
-}
-
-// ----------------------------------------------------------------------------
-// command
-// ----------------------------------------------------------------------------
-
-void mb8877_process_cmd(int delay)
-{
-	registers[STATUS] = FDC_ST_HEADENG | FDC_ST_BUSY;	// Initial status	
-	wait(delays[delay]);			// Wait to simulate execution
-	registers[STATUS] = FDC_ST_HEADENG;			// Set result status
-
-}
-
-void fdc_process_cmd()
-{
-#ifdef _FDC_DEBUG_LOG
-	static const _TCHAR *cmdstr[0x10] = {
-		_T("RESTORE "),	_T("SEEK    "),	_T("STEP    "),	_T("STEP    "),
-		_T("STEP IN "),	_T("STEP IN "),	_T("STEP OUT"),	_T("STEP OUT"),
-		_T("RD DATA "),	_T("RD DATA "),	_T("RD DATA "),	_T("WR DATA "),
-		_T("RD ADDR "),	_T("FORCEINT"),	_T("RD TRACK"),	_T("WR TRACK")
-	};
-	emu->out_debug(_T("FDC\tCMD=%2xh (%s) DATA=%2xh DRV=%d TRK=%3d SIDE=%d SEC=%2d\n"), cmdreg, cmdstr[cmdreg >> 4], datareg, drvreg, trkreg, sidereg, secreg);
 #endif
-	while true
-	{
-		CANCEL_EVENT(EVENT_TYPE4);
-		set_irq(false);
-	
-		status = FDC_ST_HEADENG|FDC_ST_BUSY;	// We are BUSY
-		wait(delay[(registers[CMD] & 0x03)]);		// Wait to simulate execution
 
-		switch(registers[CMD] & 0xf0) {			// Decode which command to execute
-		// type I
-			case 0x00: cmd_restore(); break;
-			case 0x10: cmd_seek(); break;
-			case 0x20:
-			case 0x30: cmd_step(); break;
-			case 0x40:
-			case 0x50: cmd_stepin(); break;
-			case 0x60:
-			case 0x70: cmd_stepout(); break;
-		// type II
-			case 0x80:
-			case 0x90: cmd_readdata(); break;
-			case 0xa0:
-			case 0xb0: cmd_writedata(); break;
-		// type III
-			case 0xc0: cmd_readaddr(); break;
-			case 0xe0: cmd_readtrack(); break;
-			case 0xf0: cmd_writetrack(); break;
-		// type IV
-			case 0xd0: cmd_forceint(); break;
-			default: break;
-		}
+	if (!volume.init(card)) {
+#ifdef SD_DEBUG
+		Serial.println("Could not find FAT16/FAT32 partition.\nMake sure you've formatted the card");
+#endif
+		fdc.reg[STATUS] = FDC_ST_NOTREADY;
+		return;
 	}
+
+#ifdef SD_DEBUG
+	// ----- Print the type and size of the first FAT-type volume
+	Serial.print("\nVolume type is FAT");
+	Serial.println(volume.fatType(), DEC);
+	Serial.println();
+
+	long volumesize;
+	volumesize = volume.blocksPerCluster();    // clusters are collections of blocks
+	volumesize *= volume.clusterCount();       // we'll have a lot of clusters
+	volumesize *= 512;                            // SD card blocks are always 512 bytes
+	Serial.print("Volume size (bytes): ");
+	Serial.println(volumesize);
+#endif
+	root.openRoot(volume);
+	fdc.reg[STATUS] = 0x00;
 }
 
-void fdc_raiseinterrupt()
-{
+// ----------------------------------------------------------------------------
+//	Scan the directory
+// ----------------------------------------------------------------------------
+int scanDirectory(int wanted) {
+	dir_t	entry;
+	int	i=-1;
+
+	if (fdc.reg[STATUS] & FDC_ST_NOTREADY) return;	// Exit if no card
+
+	root.rewind();
+	while(root.readDir(&entry)>0) {
+//                Serial.print("DBG Read: ");
+//              	Serial.println((char*)entry.name);
+
+		i=-1;
+		if (!DIR_IS_FILE(&entry)) continue;
+		if (entry.name[0] == DIR_NAME_FREE) break;
+		if (entry.name[0] != 'D') continue;
+		if (entry.name[1] != 'I') continue;
+		if (entry.name[2] != 'S') continue;
+		if (entry.name[3] != 'K') continue;
+		if (entry.name[4] != '_') continue;
+		if ((entry.name[5] < '0')||(entry.name[5] > '9')) continue;
+		if ((entry.name[6] < '0')||(entry.name[6] > '9')) continue;
+		if ((entry.name[7] < '0')||(entry.name[7] > '9')) continue;
+		if (entry.name[8] != 'Q') continue;
+		if (entry.name[9] != 'X') continue;
+		if (entry.name[10] != '1') continue;
+
+		i=(int)entry.name[5]-48;
+		i=i*10+(int)entry.name[6]-48;
+		i=i*10+(int)entry.name[7]-48;
+
+		if (i >= wanted) break;
+	}
+	Serial.println("Fichier: ");
+	Serial.println((char*)entry.name);
+	if (entry.fileSize != 1556480)
+	{
+		Serial.print(" bad size: ");
+		Serial.print(entry.fileSize, DEC);
+		Serial.println(" != 1556480");
+	}
+	return i;
 }
+
+// ----------------------------------------------------------------------------
+// Constructor
+// ----------------------------------------------------------------------------
+MB8877::MB8877()
+{
+#ifdef FDC_DEBUG
+	Serial.println("FDC Constructor");
+#endif
+	fdc.vector = FDC_SEEK_FORWARD;
+	fdc.reg[TRACK] = fdc.reg[STATUS] = registers[CMD] = registers[SECTOR] = registers[DATA] = 0;
+	fdc.disk = -1;
+	fdc.track = fdc.side = fdc.cmdtype = 0;
+}
+
+// ----------------------------------------------------------------------------
+// Destructor
+// ----------------------------------------------------------------------------
+MB8877::~MB8877(){}
+
+// ----------------------------------------------------------------------------
+// Decode the received command
+// ----------------------------------------------------------------------------
+void	MB8877::decode_command()
+{
+#ifdef FDC_DEBUG
+	Serial.println("FDC Decoder");
+#endif
+	fdc.reg[STATUS] = FDC_ST_BUSY;			// We are BUSY
+
+	if (fdc.reg[STATUS] & FDC_ST_NOTREADY)		// Try again to open the directory
+	{
+		scanSD();
+		scanDirectory(fdc.disk);
+		if (fdc.reg[STATUS] & FDC_ST_NOTREADY) return;	// Still no SD
+	}
+
+	switch(fdc.reg[CMD] & 0xf0) {			// Decode which command to execute
+	// type I
+		case 0x00: cmd_restore(); break;
+		case 0x10: cmd_seek(); break;
+		case 0x20: cmd_step(0); break;
+		case 0x30: cmd_step(1); break;
+		case 0x40: cmd_stepin(0); break;
+		case 0x50: cmd_stepin(1); break;
+		case 0x60: cmd_stepout(0); break;
+		case 0x70: cmd_stepout(1); break;
+	// type II
+		case 0x80: fdc.cmdtype = 0; cmd_readdata(false); break;
+		case 0x90: fdc.cmdtype = 0; cmd_readdata(true); break;
+		case 0xa0: fdc.cmdtype = 0; cmd_writedata(false); break;
+		case 0xb0: fdc.cmdtype = 0; cmd_writedata(true); break;
+	// type III
+		case 0xc0: cmd_readaddr(); break;
+		case 0xe0: cmd_readtrack(); break;
+		case 0xf0: cmd_writetrack(); break;
+	// type IV
+		case 0xd0: cmd_forceint(); break;
+		default: break;
+	}
+	digitalWrite(FDC_IRQ, LOW);		// Generate interrupt, command completed
+}
+
+// ----------------------------------------------------------------------------
+//	CCITT-CRC16 calculator
+// ----------------------------------------------------------------------------
+uint crc(uint result, uchar byte) 
+{ 
+	uchar t = 8; 
+
+	result = result ^ byte << 8; 
+	do 
+	{ 
+		if (result & 0x8000) 
+			result = result << 1 ^ 0x1021; 
+		else 
+			result = result << 1; 
+	} while (--t); 
+	return result; 
+} 
 
 // ----------------------------------------------------------------------------
 // Type I command: RESTORE
 // ----------------------------------------------------------------------------
-void cmd_restore()
+void MB8877::cmd_restore()
 {
-	fdc.cmdtype = FDC_CMD_TYPE1;
+#ifdef FDC_DEBUG
+	display(" I  RESTORE");
+#endif
+	fdc.cmdtype = FDC_CMD_RESTORE;
 	fdc.vector = FDC_SEEK_FORWARD;
 
-  	registers[TRACK] = 0x00;
-  	registers[SIDE] = 0x00;
-	registers[STATUS] = FDC_ST_HEADENG | FDC_ST_BUSY;
+	fdc.reg[STATUS] = 0x00;
+
+	sprintf(filename,"DISK_%03dQX1",fdc.disk);
+	sdcard=sd.open(filename,2);
+
+	// To simulate we've got the track number from the first sector encountered,
+	// we compare the current track and the content of track register; if they
+	// differ, we yield SEEKERR.
+
+	if ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[TRACK] != fdc.track))
+	{
+		fdc.reg[STATUS] = FDC_ST_HEADENG|FDC_ST_SEEKERR;
+	}
+	else
+	{
+		fdc.side = 0x00;
+		fdc.reg[TRACK] = fdc.track = 0x00;
+		fdc.reg[SECTOR] = 0x00;
+		fdc.reg[STATUS] = FDC_ST_TRACK00|FDC_ST_INDEX|FDC_ST_HEADENG;
+	}
 }
 
 // ----------------------------------------------------------------------------
 // Type I command: SEEK
 // ----------------------------------------------------------------------------
-// fdc_datareg contains the track we want to reach
-void cmd_seek()
+// fdc.reg[DATA] contains the track we want to reach
+void MB8877::cmd_seek()
 {
+#ifdef FDC_DEBUG
+	display(" I  SEEK");
+#endif
 	fdc.cmdtype = FDC_CMD_SEEK;			// Set command type
-	fdc.vector = !(registers[DATA] > registers[TRACK]);		// Determine seek vector
+	fdc.vector = !(fdc.reg[DATA] > fdc.track);	// Determine seek vector
 
-	registers[TRACK] = (registers[DATA]>FDC_FRM_MAXTRACK)?FDC_FRM_MAXTRACK:(registers[DATA] < 0)?0:registers[DATA];	// Set track register
+	fdc.reg[STATUS] = 0x00;
 
-	dbaddr = registers[TRACK]*FDC_TRACK_SIZE;
-	fdc_raiseinterrupt();
-	registers[STATUS] = (registers[TRACK] == 0) ? FDC_ST_HEADENG : FDC_ST_HEADENG|FDC_ST_TRACK00;
+	if ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[TRACK] != fdc.track))
+	{
+		fdc.reg[STATUS] = FDC_ST_HEADENG|FDC_ST_SEEKERR;
+	}
+	else
+	{
+		// Set track register
+		fdc.reg[TRACK] = fdc.track = (fdc.reg[DATA]>FDC_TRACKS)?FDC_TRACKS:(registers[DATA] < 0)?0:registers[DATA];
+		fdc.reg[STATUS] = (fdc.reg[TRACK] == 0) ? FDC_ST_HEADENG : FDC_ST_HEADENG|FDC_ST_TRACK00;
+	}
 }
 
 // ----------------------------------------------------------------------------
 // Type I command: STEP
 // ----------------------------------------------------------------------------
-void cmd_step()
+void MB8877::cmd_step(byte track_update)
 {
-	if (fdc.vector) cmd_stepout() else cmd_stepin();
+#ifdef FDC_DEBUG
+	display(" I  STEP");
+#endif
+	if (fdc.vector) cmd_stepout(track_update) else cmd_stepin(track_update);
 }
 
 // ----------------------------------------------------------------------------
 // Type I command: STEP-IN
 // ----------------------------------------------------------------------------
-void cmd_stepin()
+void MB8877::cmd_stepin(byte track_update)
 {
+#ifdef FDC_DEBUG
+	display(" I  STEP_IN");
+#endif
 	fdc.cmdtype = FDC_CMD_STEP_IN;		// Set command type
 
 	fdc.vector = false;			// Reset seek vector
-	registers[TRACK] = (registers[TRACK]<FDC_FRM_MAXTRACK) ? registers[TRACK]+1 : FDC_FRM_MAXTRACK;
-	dbaddr = registers[TRACK]*FDC_TRACK_SIZE;
-	fdc_raiseinterrupt();
-	registers[STATUS] = FDC_ST_HEADENG;
+	fdc.reg[STATUS] = 0x00;
+
+	if ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[TRACK] != fdc.track))
+	{
+		fdc.reg[STATUS] = FDC_ST_HEADENG|FDC_ST_SEEKERR;
+	}
+	else
+	{
+		fdc.track++;				// Next track
+		if(fdc.track>FDC_TRACKS) fdc.track=FDC_TRACKS;
+		if(track_update) fdc.reg[TRACK] = fdc.track;
+		fdc.reg[STATUS] = FDC_ST_HEADENG;
+	}
 }
 
 // ----------------------------------------------------------------------------
 // Type I command: STEP-OUT
 // ----------------------------------------------------------------------------
-void cmd_stepout()
+void MB8877::cmd_stepout(byte track_update)
 {
+#ifdef FDC_DEBUG
+	display(" I  STEP_OUT");
+#endif
 	fdc.cmdtype = FDC_CMD_STEP_OUT;		// Set command type
 
 	fdc.vector = true;			// Set seek vector
-	registers[TRACK] = (registers[TRACK]>0) ? registers[TRACK]-1 : 0;
-	dbaddr = registers[TRACK]*FDC_TRACK_SIZE;
-	fdc_raiseinterrupt();
-	registers[STATUS] = (registers[TRACK] == 0) ? FDC_ST_HEADENG : FDC_ST_HEADENG|FDC_ST_TRACK00;
-}
+	fdc.reg[STATUS] = 0x00;
 
-// wait 70msec to read/write data just after seek command is done
-#define GET_SEARCH_TIME (after_seek ? (after_seek = false, 70000) : 200)
+	if ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[TRACK] != fdc.track))
+	{
+		fdc.reg[STATUS] = FDC_ST_HEADENG|FDC_ST_SEEKERR;
+	}
+	else
+	{
+		fdc.track--;			// Previous track
+		if(fdc.track<0) { fdc.track=0; fdc.reg[STATUS] = FDC_ST_TRACK0; }
+		if(track_update) fdc.reg[TRACK] = fdc.track;
+		fdc.reg[STATUS] |= FDC_ST_HEADENG;
+	}
+}
 
 // ----------------------------------------------------------------------------
 // Type II command: READ-DATA
 // ----------------------------------------------------------------------------
-void cmd_readdata()
+void MB8877::cmd_readdata(byte multiple)
 {
-	char	filename[8];
+	int16_t	byte,		// the byte we'll read
+		blocksize,	// # bytes to read / sector
+		nsectors;	// # sectors to read
+#ifdef FDC_DEBUG
+	display(" II READ_DATA");
+#endif
 
-	fdc.cmdtype = (registers[CMD] & 0x10) ? FDC_CMD_RD_MSEC : FDC_CMD_RD_SEC;
+	fdc.reg[STATUS] = FDC_ST_BUSY|FDC_ST_RECNFND;		// Busy and no Record found yet
 
-	registers[STATUS] |= FDC_ST_BUSY;		// Set Busy flag
-	wait(delay[(cmdreg & 3)] + ((registers[CMD] & 0x04) ? FDC_EXTRA_DELAY : 0));		// Wait to simulate execution
-	registers[STATUS] &= ~FDC_ST_BUSY;		// Reset Busy flag
+	// If CMDTYPE is not set, we must compare the side. If CMDTYPE is already set, the side comparison has already been done.
+	if ( (fdc.cmdtype == 0) && ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[CMD] & 0x08) != fdc.side)) ) return;
 
-	if(registers[CMD] & 2) {	// Side Compare flag is set
-		if ((registers[CMD] & 0x08) != registers[SIDE]) registers[STATUS] |= FDC_ST_RECNFND;
+	// Calculate the number of sectors we will have to read
+	if (multiple)
+	{
+		if(fdc.cmdtype == 0) fdc.cmdtype = FDC_CMD_RD_MSEC;
+		nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1) - fdc.reg[SECTOR];
 	}
-	else {
-		registers[SIDE] = (registers[CMD] & 0x08) ? 1 : 0;
-		sdcard=sd.open(filename,2);
-		sd.seek(sdcard,locate());
-// ------/
-   
-		if (!SD.begin(4)) {
-			Serial.println("initialization failed!");
-			return;
+	else
+	{
+		if(fdc.cmdtype == 0) fdc.cmdtype = FDC_CMD_RD_SEC;
+		nsectors = 1;
+	}
+	blocksize = (fdc.track<80) ? FDC_SIZE_SECTOR_0 : FDC_SIZE_SECTOR_1;
+
+	// Try to set file cursor at the desired position.
+	if (! sd.seekSet(locate()) ) return;	// Exit with record not found status
+
+
+PLUG HERE THE BEHAVIOR IF DATA ADDRESS MARK ON DISK (first byte) IS SET TO DELETE
+
+	// Main loop: we'll read the sectors byte per byte,
+	// transfer each byte to the Data register and generate a DRQ
+	for(;fdc.reg[SECTOR] < fdc.reg[SECTOR]+nsectors; fdc.reg[SECTOR]++)
+	{
+		for(fdc.position=0; byte=sd.read())!=-1 && fdc.position < blocksize; fdc.position++)
+		{
+			fdc.reg[STATUS] &= ~FDC_ST_RECNFND;		// Reset RECNFND
+			send_qx1(fdc.reg[DATA]);
 		}
-		Serial.println("initialization done.");
-  
-		fd = SD.open("00.DSK", FILE_WRITE);
-  
-  // if the file opened okay, write to it:
-  if (myFile) {
-    Serial.print("Writing to test.txt...");
-    fd.println("testing 1, 2, 3.");
-    // close the file:
-    fd.close();
-    Serial.println("done.");
-  } else {
-    // if the file didn't open, print an error:
-    Serial.println("error opening test.txt");
-  }
-  
-  // re-open the file for reading:
-  myFile = SD.open("test.txt");
-  if (myFile) {
-    Serial.println("test.txt:");
-    
-    // read from the file until there's nothing else in it:
-    while (myFile.available()) {
-        Serial.write(myFile.read());
-    }
-    // close the file:
-    myFile.close();
-  } else {
-    // if the file didn't open, print an error:
-    Serial.println("error opening test.txt");
-  }
-
-// ******-
-		while(sd.read(
-		block_addr = trkreg * (FDC_FRM_BLOCKSIZE * secreg) + sidereg * FDC_FRM_MAXTRACK * FDC_FRM_MAXSECTOR * FDC_FRM_BLOCKSIZE;
-
-		status = search_sector(fdc[drvreg].track, sidereg, secreg, false);
-	}
-	if(!(status & FDC_ST_RECNFND)) {
-//		status |= FDC_ST_DRQ | FDC_ST_BUSY;
-		registers[STATUS] |= FDC_ST_BUSY;
 	}
 
-
-	
-	int time = GET_SEARCH_TIME;
-	REGISTER_EVENT(EVENT_SEARCH, time);
-	CANCEL_EVENT(EVENT_LOST);
-	if(!(status & FDC_ST_RECNFND)) {
-		REGISTER_EVENT(EVENT_LOST, time + 30000);
-	}
+	nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1);
+	if(fdc.reg[SECTOR]>nsectors) fdc.reg[SECTOR]=nsectors;
 }
 
 // ----------------------------------------------------------------------------
 // Type II command: WRITE-DATA
 // ----------------------------------------------------------------------------
-void MB8877::cmd_writedata()
+void MB8877::cmd_writedata(byte multiple)
 {
-	cmdtype = (cmdreg & 0x10) ? FDC_CMD_WR_MSEC : FDC_CMD_WR_SEC;
-	if(cmdreg & 2) {
-		status = search_sector(fdc[drvreg].track, ((cmdreg & 8) ? 1 : 0), secreg, true);
+	int16_t	byte,		// the byte to serve
+		blocksize,	// # bytes / sector
+		nsectors;	// # sectors to write
+#ifdef FDC_DEBUG
+	display(" II WRITE_DATA");
+#endif
+
+	// Calculate the number of sectors we will have to write
+	if (multiple)
+	{
+		fdc.cmdtype = FDC_CMD_WR_MSEC;
+		nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1) - fdc.reg[SECTOR];
 	}
-	else {
-		status = search_sector(fdc[drvreg].track, sidereg, secreg, false);
+	else
+	{
+		fdc.cmdtype = FDC_CMD_WR_SEC;
+		nsectors = 1;
 	}
-	status &= ~FDC_ST_RECTYPE;
-	if(!(status & FDC_ST_RECNFND)) {
-//		status |= FDC_ST_DRQ | FDC_ST_BUSY;
-		status |= FDC_ST_BUSY;
+	blocksize = (fdc.track<80) ? FDC_SIZE_SECTOR_0 : FDC_SIZE_SECTOR_1;
+
+	fdc.reg[STATUS] = FDC_ST_BUSY|FDC_ST_HEADENG;
+
+	// Make some comparison: is it the desired side ? Is reg[SECTOR] Ok ?
+
+	if (((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[CMD] & 0x08) != fdc.side)
+		|| (fdc.reg[SECTOR] > nsectors) )
+	{
+		fdc.reg[STATUS] |= FDC_ST_RECNFND;
+		return;			// Exit with record not found status
 	}
-	
-	int time = GET_SEARCH_TIME;
-	REGISTER_EVENT(EVENT_SEARCH, time);
-	CANCEL_EVENT(EVENT_LOST);
-	if(!(status & FDC_ST_RECNFND)) {
-		REGISTER_EVENT(EVENT_LOST, time + 30000);
+
+	// Main loop: we'll service the sector byte per byte.
+	// transfer each byte to the Data register and generate a DRQ
+	for(;fdc.reg[SECTOR] < fdc.reg[SECTOR]+nsectors; fdc.reg[SECTOR]++)
+	{
+		// Write the Data Address Mark on the first byte of the current sector
+		byte = (fdc.reg[CMD] & FDC_FLAG_DAM) ? 0x01 : 0x00;
+		if (sd.write((const void*)&byte,1))!=-1)	// Write error
+		{
+			fdc.reg[STATUS] |= FDC_ST_WRITEFAULT;
+			return;
+		}
+		fdc.position=0;
+		do
+		{
+			qx1bus = 0xff;
+			PORTC &= 0xf0;
+			PORTC |= BUS_SELECT_DATA;			// Prepare bus to get data
+
+			attachInterrupt(0, read_qx1, FALLING);	// Prepare interrupt
+			digitalWrite(FDC_DRQ, LOW);			// Fire DRQ Interrupt
+			__asm__("nop\n\t""nop\n\t");			// Waits ~ 125 nsec
+			if(qx1bus == 0xff)
+			{
+				fdc.reg[STATUS] |= FDC_ST_LOSTDATA;	// QX1 did not load DATA in time; exits
+				return;
+			}
+			
+			if (sd.write((const void*)&byte,1))!=-1)	// Write error
+			{
+				fdc.reg[STATUS] |= FDC_ST_WRITEFAULT;
+				return;
+			}
+		} until (fdc.position++ > blocksize);
 	}
+
+	nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1);
+	if(fdc.reg[SECTOR]>nsectors) fdc.reg[SECTOR]=nsectors;
 }
 
+// ----------------------------------------------------------------------------
+// Type III command: READ-ADDRESS
+// ----------------------------------------------------------------------------
 void MB8877::cmd_readaddr()
 {
-	// type-3 read address
-	cmdtype = FDC_CMD_RD_ADDR;
-	status = search_addr();
-	if(!(status & FDC_ST_RECNFND)) {
-//		status |= FDC_ST_DRQ | FDC_ST_BUSY;
-		status |= FDC_ST_BUSY;
-	}
-	
-	int time = GET_SEARCH_TIME;
-	REGISTER_EVENT(EVENT_SEARCH, time);
-	CANCEL_EVENT(EVENT_LOST);
-	if(!(status & FDC_ST_RECNFND)) {
-		REGISTER_EVENT(EVENT_LOST, time + 10000);
-	}
+	uint	_crc=0xffff;
+#ifdef FDC_DEBUG
+	display("III READ_ADDR");
+#endif
+
+	fdc.cmdtype = FDC_CMD_RD_ADDR;
+
+	fdc.reg[STATUS] |= FDC_ST_BUSY|FDC_ST_HEADENG;
+
+	// Compute CRC
+	_crc=crc(_crc, fdc.reg[TRACK]);
+	_crc=crc(_crc, fdc.side);
+	_crc=crc(_crc, fdc.reg[SECTOR]);
+
+	// 0x02=512 bytes/sector, 0x03=1024 bytes/sector
+	_crc=crc(_crc, (fdc.reg[TRACK]<80 ? 0x03 : 0x02));
+
+	// Send data :
+	send_qx1(fdc.reg[TRACK]);			// 1- Track Address
+	send_qx1(fdc.side);				// 2- Side number
+	send_qx1(fdc.reg[SECTOR]);			// 3- Sector Address
+	send_qx1((fdc.reg[TRACK]<80 ? 0x03 : 0x02));	// 4- Sector length
+	send_qx1((uchar) _crc & 0xff);			// 5- CRC1
+	_crc=_crc >> 8;
+	send_qx1((uchar) _crc & 0xff);			// 6- CRC2
 }
+
+// ----------------------------------------------------------------------------
+// Type III command: READ-TRACK
+// ----------------------------------------------------------------------------
+//	The QX1 expects to read the track byte per byte, including gaps, address
+//	marks and CRC. Because we only store data on the SD card, we have to
+//	generate some expected bytes.
+//	(G) represents generated bytes
+//	(R) represents register bytes
+//	(D) represents actual data bytes.
 
 void MB8877::cmd_readtrack()
 {
+	uint	_crc=0xffff;
+
+#ifdef FDC_DEBUG
+	display("III READ_TRACK");
+#endif
+
 	// type-3 read track
 	cmdtype = FDC_CMD_RD_TRK;
 //	status = FDC_ST_DRQ | FDC_ST_BUSY;
-	status = FDC_ST_BUSY;
-	
+	status = FDC_ST_BUSY | FDC_ST_RECNFND;
+
+	// If side Compare flag is set, compare the current and desired sides
+	// and exits if they differ.
+	if ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[CMD] & 0x08) != fdc.side)) return;
+
+	// Try to set file cursor at the desired position.
+	if (! sd.seekSet(locate()) ) return;	// Exit with record not found status
+
+	// Send ID RECORD
+	for(i=0; i<80; i++) send_qx1(0x4e);	// 000-079: (G) GAP 0
+	for(i=0; i<12; i++) send_qx1(0x00);	// 080-091: (G) SYNC
+	for(i=0; i<3; i++) send_qx1(0xc2);	// 092-(G) Index address mark
+	send_qx1(0xfc);				// (G) Index address mark
+	for(i=0; i<50; i++) send_qx1(0x4e);	// (G) GAP 1
+	for(i=0; i<12; i++) send_qx1(0x00);	// (G) SYNC
+	// Send DATA
+	if(fdc.reg[TRACK]<80)
+	{
+		fdc.reg[SECTOR]=0+fdc.side*5; readsector();
+		fdc.reg[SECTOR]=3+fdc.side*5; readsector();
+		fdc.reg[SECTOR]=1+fdc.side*5; readsector();
+		fdc.reg[SECTOR]=4+fdc.side*5; readsector();
+		fdc.reg[SECTOR]=2+fdc.side*5; readsector();
+	}
+	else
+	{
+		fdc.reg[SECTOR]=0+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=1+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=2+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=3+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=4+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=5+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=6+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=7+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=8+fdc.side*10; readsector();
+		fdc.reg[SECTOR]=9+fdc.side*10; readsector();
+	}
+/*
 	if(!make_track()) {
 		// create dummy track
 		for(int i = 0; i < 0x1800; i++) {
@@ -759,12 +710,43 @@ void MB8877::cmd_readtrack()
 	fdc[drvreg].index = 0;
 	
 	int time = GET_SEARCH_TIME;
-	REGISTER_EVENT(EVENT_SEARCH, time);
-	REGISTER_EVENT(EVENT_LOST, time + 150000);
+*/
+}
+
+void readsector()
+{
+	int	i;
+	uint	_crc=0xffff;
+
+#ifdef FDC_DEBUG
+	display("--- READSECTOR");
+#endif
+/* Start of ID FIELD */
+	for(i=0; i<3; i++) send_qx1(0xa1);	// (G) Index address mark
+	send_qx1(0xfe);				// (G) Index address mark
+	send_qx1(fdc.reg[TRACK]);		// (R) Track Index
+	send_qx1(0x00);				// (G)
+	send_qx1(fdc.reg[SECTOR]);		// (R) Sector Index
+	send_qx1(0x00);				// (G)
+						// Compute CRC
+	_crc=crc(_crc, fdc.reg[TRACK]);
+	_crc=crc(_crc, fdc.reg[SECTOR]);
+	send_qx1((uchar) _crc & 0xff);		// (G) CRC byte 1
+	_crc=_crc >> 8;
+	send_qx1((uchar) _crc & 0xff);		// (G) CRC byte 2
+/* End of ID FIELD */
+/* Start of DATA FIELD */
+	for(i=0; i<22; i++) send_qx1(0x4e);	// (G) GAP 2
+	for(i=0; i<12; i++) send_qx1(0x00);	// (G) SYNC
+	cmd_readdata(true);			// DATA_AM: Invoke cmd_readdata to read the sector
+	for(i=0; i<22; i++) send_qx1(0x4e);	// (G) GAP 2
 }
 
 void MB8877::cmd_writetrack()
 {
+#ifdef FDC_DEBUG
+	display("III WRITE_TRACK");
+#endif
 	// type-3 write track
 	cmdtype = FDC_CMD_WR_TRK;
 //	status = FDC_ST_DRQ | FDC_ST_BUSY;
@@ -774,47 +756,77 @@ void MB8877::cmd_writetrack()
 	fdc[drvreg].index = 0;
 	
 	int time = GET_SEARCH_TIME;
-	REGISTER_EVENT(EVENT_SEARCH, time);
-	REGISTER_EVENT(EVENT_LOST, time + 150000);
 }
 
 // ----------------------------------------------------------------------------
 // Type IV command: FORCE-INTERRUPT
 // ----------------------------------------------------------------------------
 
-void cmd_forceint()
+void MB8877::cmd_forceint()
 {
-	if(cmdtype == 0 || cmdtype == 4) {
+#ifdef FDC_DEBUG
+	display(" IV FORCE_INT");
+#endif
+	if(fdc.cmdtype == 0 || fdc.cmdtype == 4) {
 		status = 0;
 		cmdtype = FDC_CMD_TYPE1;
 	}
-	registers[STATUS] &= ~FDC_ST_BUSY;
-#endif
+	fdc.reg[STATUS] &= ~FDC_ST_BUSY;
+	sd.close(sdcard);
 	
 	// force interrupt if bit0-bit3 is high
-	if(cmdreg & 0x0f) {
-		set_irq(true);
-	}
-	CANCEL_EVENT(EVENT_SEEK);
-	CANCEL_EVENT(EVENT_SEEKEND);
-	CANCEL_EVENT(EVENT_SEARCH);
-	CANCEL_EVENT(EVENT_TYPE4);
-	CANCEL_EVENT(EVENT_MULTI1);
-	CANCEL_EVENT(EVENT_MULTI2);
-	CANCEL_EVENT(EVENT_LOST);
-	REGISTER_EVENT(EVENT_TYPE4, 100);
+	if(cmdreg & 0x0f) digitalWrite(FDC_IRQ, HIGH);
 }
 
 // ----------------------------------------------------------------------------
 // media handler
 // ----------------------------------------------------------------------------
+//	Locate calculate the offset to reach the right sector given the side,
+//	track and sector number.
+//	On the QX1, the density differs if the track is below or above track 80.
+// 	Moreover, for track below 80, sectors are interlaced and appears in
+//	the following order after index hole:
+//
+//	Track 00-79
+//	Side 0: [ 0 | 3 | 1 | 4 | 2 ]
+//	Side 1: [ 5 | 8 | 6 | 9 | 7 ]
+//	
+//	Track 80-159
+//	Side 0: [ 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 ]
+//	Side 1: [ 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 ]
 
-long	locate()
+long	MB8877::locate()
 {
-	return (long)(registers[TRACK] * (FDC_FRM_BLOCKSIZE * registers[SECTOR]) + registers[SIDE] * FDC_FRM_MAXTRACK * FDC_FRM_MAXSECTOR * FDC_FRM_BLOCKSIZE);
+	long	offset=fdc.side * FDC_SIDE;	// Side offset
+
+	if(fdc.track<80)
+	{
+		offset += (fdc.track-1) * FDC_SIZE_TRACK_0;	// # tracks below 80
+		switch(fdc.reg[SECTOR])
+		{
+			case 0:	
+			case 5: break;
+			case 3:	
+			case 8: offset+=FDC_SIZE_SECTOR_0;	break;
+			case 1:	
+			case 6: offset+=2*FDC_SIZE_SECTOR_0;	break;
+			case 4:	
+			case 9: offset+=3*FDC_SIZE_SECTOR_0;	break;
+			case 2:	
+			case 7: offset+=4*FDC_SIZE_SECTOR_0;	break;
+		}
+	}
+	else
+	{
+		// Number of tracks in each zone, minus the current track
+		offset += 80 * FDC_SIZE_TRACK_0;		// 80 tracks of FDC_TRACK_SIZE_0
+		offset += (fdc.track-81) * FDC_SIZE_TRACK_1;	// tracks above 80
+		offset += fdc.reg[SECTOR] * FDC_SIZE_SECTOR_1;
+	}
+	return offset;
 }
 
-u8 MB8877::search_track()
+uchar mb8877_search_track()
 {
 	int trk = fdc[drvreg].track;
 	
@@ -834,11 +846,11 @@ u8 MB8877::search_track()
 	return FDC_ST_SEEKERR;
 }
 
-u8 MB8877::search_sector(int trk, int side, int sct, bool compare)
+uchar mb8877_search_sector(int trk, int side, int sct, bool compare)
 {
 	// get track
 	if(!disk[drvreg]->get_track(trk, side)) {
-		set_irq(true);
+		digitalWrite(FDC_IRQ, HIGH);
 		return FDC_ST_RECNFND;
 	}
 	
@@ -874,20 +886,20 @@ u8 MB8877::search_sector(int trk, int side, int sct, bool compare)
 		fdc[drvreg].index = 0;
 		return (disk[drvreg]->deleted ? FDC_ST_RECTYPE : 0) | ((disk[drvreg]->status && !ignore_crc) ? FDC_ST_CRCERR : 0);
 	}
-	
+
 	// sector not found
 	disk[drvreg]->sector_size = 0;
-	set_irq(true);
+	digitalWrite(FDC_IRQ, HIGH);
 	return FDC_ST_RECNFND;
 }
 
-u8 MB8877::search_addr()
+uchar mb8877_search_addr()
 {
 	int trk = fdc[drvreg].track;
 	
 	// get track
 	if(!disk[drvreg]->get_track(trk, sidereg)) {
-		set_irq(true);
+		digitalWrite(FDC_IRQ, HIGH);
 		return FDC_ST_RECNFND;
 	}
 	
@@ -905,11 +917,11 @@ u8 MB8877::search_addr()
 	
 	// sector not found
 	disk[drvreg]->sector_size = 0;
-	set_irq(true);
+	digitalWrite(FDC_IRQ, HIGH);
 	return FDC_ST_RECNFND;
 }
 
-bool MB8877::make_track()
+bool mb8877_make_track()
 {
 	int trk = fdc[drvreg].track;
 	
@@ -917,67 +929,113 @@ bool MB8877::make_track()
 }
 
 // ----------------------------------------------------------------------------
-// irq / drq
+// Send a byte to the QX1 via DAL
 // ----------------------------------------------------------------------------
 
-void MB8877::set_irq(bool val)
+void send_qx1(uchar byte)
 {
-	write_signals(&outputs_irq, val ? 0xffffffff : 0);
-}
+	DDRD = 0xff;					// Set PORT D as output
 
-void MB8877::set_drq(bool val)
-{
-	write_signals(&outputs_drq, val ? 0xffffffff : 0);
+	PORTC &= 0xf0;
+	PORTC |= BUS_SELECT_DATA;			// Select the bus
+
+	PORTD = byte;					// Write the byte
+
+	PORTC &= 0xf0;
+	PORTC |= BUS_SELECT_ADDRESS;			// Latch the bus
+
+	DDRD = 0x00;					// Set PORT D as input
+
+	digitalWrite(INT0, HIGH); 			// Activate internal pullup resistor
+	attachInterrupt(0, read_qx1, FALLING);		// Declare interrupt routine
+	digitalWrite(FDC_DRQ, LOW);			// Fire DRQ Interrupt
+	__asm__("nop\n\t""nop\n\t");			// Waits ~ 125 nsec
+	if(qx1bus == 0xff)
+		fdc.reg[STATUS] |= FDC_ST_LOSTDATA;	// QX1 did not load DATA in time
+	else
+		fdc.reg[STATUS] &= ~FDC_ST_LOSTDATA;	// QX1 got DATA in time
 }
 
 // ----------------------------------------------------------------------------
-// user interface
+// We've got an interrupt. We scan /RD, /WR, A0 and A1 to determine what is
+// requested.
+//
+//    X   X   X   X  A1  A0 /WR /RD         MPU wants to ...
+//  ---+---+---+---+---+---+---+---+------+---------------------------
+//   -   -   -   -   0   0   0   1 | 0x01 | write to fdc.reg[CMD]
+//   -   -   -   -   0   0   1   0 | 0x02 | read fdc.reg[STATUS]
+//   -   -   -   -   0   1   0   1 | 0x05 | write to fdc.reg[TRACK]
+//   -   -   -   -   0   1   1   0 | 0x06 | read fdc.reg[TRACK]
+//   -   -   -   -   1   0   0   1 | 0x09 | write to fdc.reg[SECTOR]
+//   -   -   -   -   1   0   1   0 | 0x0a | read fdc.reg[SECTOR]
+//   -   -   -   -   1   1   0   1 | 0x0d | write to fdc.reg[DATA]
+//   -   -   -   -   1   1   1   0 | 0x0e | read fdc.reg[DATA]
+//
+// All other values are impossible to occur.
 // ----------------------------------------------------------------------------
 
-void MB8877::open_disk(int drv, _TCHAR path[], int offset)
-{
-	if(drv < MAX_DRIVE) {
-		disk[drv]->open(path, offset);
-	}
+void read_qx1() {
+	qx1bus=(PORTD & 0x0f); 		// Get value
+	PORTC &= 0xf0;
+	PORTC |= BUS_SELECT_DATA;	// Prepare bus to get data
 }
 
-void MB8877::close_disk(int drv)
-{
-	if(drv < MAX_DRIVE) {
-		disk[drv]->close();
-		cmdtype = 0;
-	}
-}
+// ----------------------------------------------------------------------------
+// Main loop
+// ----------------------------------------------------------------------------
 
-bool MB8877::disk_inserted(int drv)
+void loop()
 {
-	if(drv < MAX_DRIVE) {
-		return disk[drv]->inserted;
-	}
-	return false;
-}
-
-void MB8877::set_drive_type(int drv, u8 type)
-{
-	if(drv < MAX_DRIVE) {
-		disk[drv]->drive_type = type;
-	}
-}
-
-u8 MB8877::get_drive_type(int drv)
-{
-	if(drv < MAX_DRIVE) {
-		return disk[drv]->drive_type;
-	}
-	return DRIVE_TYPE_UNK;
-}
-
-u8 MB8877::fdc_status()
-{
-	// for each virtual machines
-#if defined(_FMR50) || defined(_FMR60)
-	return disk[drvreg]->inserted ? 2 : 0;
-#else
-	return 0;
+#ifdef DEBUG
+	int incomingByte;
 #endif
+	digitalWrite(FDC_DRQ, HIGH);	// Reset DRQ interrupt
+	digitalWrite(FDC_IRQ, HIGH);
+
+	PORTC &= 0xf0;
+	PORTC |= BUS_SELECT_ADDRESS;
+
+// - Prepare interrupts; on falling edge, we'll call getNewCommand
+	attachInterrupt(0, getNewCommand, FALLING);
+
+	// Global Enable INT0 interrupt
+	GICR |= ( 1 < < INT0);
+	// Signal change triggers interrupt
+	MCUCR |= ( 1 << ISC00);
+	MCUCR |= ( 0 << ISC01);
+
+#ifdef DEBUG
+	if (Serial.available() > 0) {
+		// read the incoming byte:
+		incomingByte = Serial.read();
+		switch(incomingByte)
+		{
+  			case 'r': 
+  			case 'R': if(lock){++side&=2; Serial.print("SIDE=");Serial.println(side);} break;
+    			case 'O': if(lock){Serial.println("OPEN");} break;
+			case '+': if(!lock){Serial.println(">"); disk = scanDirectory(disk + 1);}
+                                  else {track++; Serial.print("TRACK=");Serial.println(track);} break;
+			case '-': if(!lock){Serial.println("<"); disk = scanDirectory(disk - 1);} break;
+			case '0': if(!lock){Serial.println("<<"); disk = scanDirectory(0);} break;
+			case '.': if(!lock){Serial.println(">>"); disk = scanDirectory(999);} break;
+			case ' ': lock=!lock; break;
+		}
+	}
+#endif
+
+// We now wait for a command
+	switch(qx1bus)
+	{
+		// QX1 MPU wants to write in a register; we get the value from PORTD
+		case 0x01: fdc.reg[CMD] = PORTD; decode_command(); break;
+		case 0x05: fdc.reg[TRACK] = PORTD; break;
+		case 0x09: fdc.reg[SECTOR] = PORTD; break;
+		case 0x0d: fdc.reg[DATA] = PORTD; break;
+
+		// QX1 MPU wants to read from a register; we serve the value on PORTD
+		case 0x02: PORTD = fdc.reg[STATUS]; break;
+		case 0x06: PORTD = fdc.reg[TRACK]; break;
+		case 0x0a: PORTD = fdc.reg[SECTOR]; break;
+		case 0x0e: PORTD = fdc.reg[DATA]; break;
+	}
 }
