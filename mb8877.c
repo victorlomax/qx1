@@ -331,16 +331,16 @@ void	MB8877::decode_command()
 		case 0x60: cmd_stepout(FDC_CMD_STEP_OUT, 0); break;
 		case 0x70: cmd_stepout(FDC_CMD_STEP_OUT, 1); break;
 	// type II
-		case 0x80: cmd_readdata(FDC_CMD_RD_SEC); break;
-		case 0x90: cmd_readdata(FDC_CMD_RD_MSEC); break;
-		case 0xa0: cmd_writedata(FDC_CMD_WR_SEC); break;
-		case 0xb0: cmd_writedata(FDC_CMD_WR_MSEC); break;
+		case 0x80: cmd_readdata(FDC_CMD_RD_SEC,(CRC)NULL); break;
+		case 0x90: cmd_readdata(FDC_CMD_RD_MSEC,(CRC)NULL); break;
+		case 0xa0: cmd_writedata(FDC_CMD_WR_SEC,(CRC)NULL); break;
+		case 0xb0: cmd_writedata(FDC_CMD_WR_MSEC,(CRC)NULL); break;
 	// type III
 		case 0xc0: cmd_readaddr(FDC_CMD_RD_ADDR); break;
 		case 0xe0: cmd_readtrack(FDC_CMD_RD_TRK); break;
 		case 0xf0: cmd_writetrack(FDC_CMD_WR_TRK); break;
 	// type IV
-		case 0xd0: cmd_forceint(); break;
+		case 0xd0: cmd_forceint(FDC_CMD_TYPE1); break;
 		default: break;
 	}
 	digitalWrite(FDC_IRQ, LOW);		// Generate interrupt, command completed
@@ -471,7 +471,7 @@ void MB8877::cmd_stepout(int cmd, byte track_update)
 // ----------------------------------------------------------------------------
 // Type II command: READ-DATA
 // ----------------------------------------------------------------------------
-void MB8877::cmd_readdata(int cmd, CRC *crc)
+void MB8877::cmd_readdata(int cmd, CRC crc)
 {
 	int16_t	byte,		// the byte we'll read
 		blocksize,	// # bytes to read / sector
@@ -592,7 +592,7 @@ void MB8877::cmd_writedata(int cmd)
 // ----------------------------------------------------------------------------
 void MB8877::cmd_readaddr()
 {
-	uint	_crc=0xffff;
+	CRC crc = new CRC;
 #ifdef FDC_DEBUG
 	display("III READ_ADDR");
 #endif
@@ -602,12 +602,12 @@ void MB8877::cmd_readaddr()
 	fdc.reg[STATUS] |= FDC_ST_BUSY|FDC_ST_HEADENG;
 
 	// Compute CRC
-	_crc=crc(_crc, fdc.reg[TRACK]);
-	_crc=crc(_crc, fdc.side);
-	_crc=crc(_crc, fdc.reg[SECTOR]);
+	crc.compute(fdc.reg[TRACK]);
+	crc.compute(fdc.side);
+	crc.compute(fdc.reg[SECTOR]);
 
 	// 0x02=512 bytes/sector, 0x03=1024 bytes/sector
-	_crc=crc(_crc, (fdc.reg[TRACK]<80 ? 0x03 : 0x02));
+	crc.compute(fdc.reg[TRACK]<80 ? 0x03 : 0x02));
 
 	// Send data :
 	send_qx1(fdc.reg[TRACK]);			// 1- Track Address
