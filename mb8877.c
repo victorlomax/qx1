@@ -331,10 +331,10 @@ void	MB8877::decode_command()
 		case 0x60: cmd_stepout(FDC_CMD_STEP_OUT, 0); break;
 		case 0x70: cmd_stepout(FDC_CMD_STEP_OUT, 1); break;
 	// type II
-		case 0x80: cmd_readdata(FDC_CMD_RD_SEC,(CRC)NULL); break;
-		case 0x90: cmd_readdata(FDC_CMD_RD_MSEC,(CRC)NULL); break;
-		case 0xa0: cmd_writedata(FDC_CMD_WR_SEC,(CRC)NULL); break;
-		case 0xb0: cmd_writedata(FDC_CMD_WR_MSEC,(CRC)NULL); break;
+		case 0x80: cmd_readdata(FDC_CMD_RD_SEC); break;
+		case 0x90: cmd_readdata(FDC_CMD_RD_MSEC); break;
+		case 0xa0: cmd_writedata(FDC_CMD_WR_SEC); break;
+		case 0xb0: cmd_writedata(FDC_CMD_WR_MSEC); break;
 	// type III
 		case 0xc0: cmd_readaddr(FDC_CMD_RD_ADDR); break;
 		case 0xe0: cmd_readtrack(FDC_CMD_RD_TRK); break;
@@ -471,8 +471,9 @@ void MB8877::cmd_stepout(int cmd, byte track_update)
 // ----------------------------------------------------------------------------
 // Type II command: READ-DATA
 // ----------------------------------------------------------------------------
-void MB8877::cmd_readdata(int cmd, CRC crc)
+void MB8877::cmd_readdata(int cmd)
 {
+	CRC crc = new CRC;
 	int16_t	byte,		// the byte we'll read
 		blocksize,	// # bytes to read / sector
 		nsectors;	// # sectors to read
@@ -505,17 +506,18 @@ PLUG HERE THE BEHAVIOR IF DATA ADDRESS MARK ON DISK (first byte) IS SET TO DELET
 	// Main loop: we'll read the sectors byte per byte,
 	// transfer each byte to the Data register and generate a DRQ
 	for(;fdc.reg[SECTOR] < fdc.reg[SECTOR]+nsectors; fdc.reg[SECTOR]++)
-	{
 		for(fdc.position=0; byte=sd.read())!=-1 && fdc.position < blocksize; fdc.position++)
 		{
 			fdc.reg[STATUS] &= ~FDC_ST_RECNFND;		// Reset RECNFND
-			if (fdc.cmdtype == FDC_CMD_RD_TRK) CRC.compute(fdc.reg[DATA]);
+			if (fdc.cmdtype == FDC_CMD_RD_TRK) crc.compute(fdc.reg[DATA]);
 			send_qx1(fdc.reg[DATA]);
 		}
-	}
-
-	nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1);
-	if(fdc.reg[SECTOR]>nsectors) fdc.reg[SECTOR]=nsectors;
+		if (fdc.cmdtype == FDC_CMD_RD_TRK)
+		{
+			send_qx1(crc.msb());
+			send_qx1(crc.lsb());
+		}
+		crc.reset();
 }
 
 // ----------------------------------------------------------------------------
@@ -614,9 +616,8 @@ void MB8877::cmd_readaddr()
 	send_qx1(fdc.side);				// 2- Side number
 	send_qx1(fdc.reg[SECTOR]);			// 3- Sector Address
 	send_qx1((fdc.reg[TRACK]<80 ? 0x03 : 0x02));	// 4- Sector length
-	send_qx1((uchar) _crc & 0xff);			// 5- CRC1
-	_crc=_crc >> 8;
-	send_qx1((uchar) _crc & 0xff);			// 6- CRC2
+	send_qx1(crc.msb());				// 5- CRC1
+	send_qx1(crc.lsb());				// 6- CRC2
 }
 
 // ----------------------------------------------------------------------------
@@ -631,7 +632,7 @@ void MB8877::cmd_readaddr()
 
 void MB8877::cmd_readtrack()
 {
-crc	_crc = new crc;
+	uint	i;
 
 #ifdef FDC_DEBUG
 	display("III READ_TRACK");
@@ -659,65 +660,15 @@ crc	_crc = new crc;
 	// Send DATA
 	if(fdc.reg[TRACK]<80)
 	{
-		fdc.reg[SECTOR]=0+fdc.side*5; readsector();
-		fdc.reg[SECTOR]=3+fdc.side*5; readsector();
-		fdc.reg[SECTOR]=1+fdc.side*5; readsector();
-		fdc.reg[SECTOR]=4+fdc.side*5; readsector();
-		fdc.reg[SECTOR]=2+fdc.side*5; readsector();
+		fdc.reg[SECTOR]=0+fdc.side*5; cmd_readsector(FDC_CMD_RD_TRK);
+		fdc.reg[SECTOR]=3+fdc.side*5; cmd_readsector(FDC_CMD_RD_TRK);
+		fdc.reg[SECTOR]=1+fdc.side*5; cmd_readsector(FDC_CMD_RD_TRK);
+		fdc.reg[SECTOR]=4+fdc.side*5; cmd_readsector(FDC_CMD_RD_TRK);
+		fdc.reg[SECTOR]=2+fdc.side*5; cmd_readsector(FDC_CMD_RD_TRK);
 	}
 	else
-	{
-		fdc.reg[SECTOR]=0+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=1+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=2+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=3+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=4+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=5+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=6+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=7+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=8+fdc.side*10; readsector();
-		fdc.reg[SECTOR]=9+fdc.side*10; readsector();
-	}
-/*
-	if(!make_track()) {
-		// create dummy track
-		for(int i = 0; i < 0x1800; i++) {
-			disk[drvreg]->track[i] = rand();
-		}
-		disk[drvreg]->track_size = 0x1800;
-	}
-	fdc[drvreg].index = 0;
-	
-	int time = GET_SEARCH_TIME;
-*/
-}
-
-void readsector()
-{
-	int	i;
-	uint	_crc=0xffff;
-
-#ifdef FDC_DEBUG
-	display("--- READSECTOR");
-#endif
-/* Start of ID FIELD */
-	for(i=0; i<3; i++) send_qx1(0xa1);	// (G) Index address mark
-	send_qx1(0xfe);				// (G) Index address mark
-	send_qx1(fdc.reg[TRACK]);		// (R) Track Index
-	send_qx1(0x00);				// (G)
-	send_qx1(fdc.reg[SECTOR]);		// (R) Sector Index
-	send_qx1(0x00);				// (G)
-						// Compute CRC
-	_crc=crc(_crc, fdc.reg[TRACK]);
-	_crc=crc(_crc, fdc.reg[SECTOR]);
-	send_qx1((uchar) _crc & 0xff);		// (G) CRC byte 1
-	_crc=_crc >> 8;
-	send_qx1((uchar) _crc & 0xff);		// (G) CRC byte 2
-/* End of ID FIELD */
-/* Start of DATA FIELD */
-	for(i=0; i<22; i++) send_qx1(0x4e);	// (G) GAP 2
-	for(i=0; i<12; i++) send_qx1(0x00);	// (G) SYNC
-	cmd_readdata(true);			// DATA_AM: Invoke cmd_readdata to read the sector
+		for(i=0; i<9; i++)
+			fdc.reg[SECTOR]=0+fdc.side*10; cmd_readsector(FDC_CMD_RD_TRK);
 	for(i=0; i<22; i++) send_qx1(0x4e);	// (G) GAP 2
 }
 
