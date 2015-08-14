@@ -508,6 +508,8 @@ PLUG HERE THE BEHAVIOR IF DATA ADDRESS MARK ON DISK (first byte) IS SET TO DELET
 	for(;fdc.reg[SECTOR] < fdc.reg[SECTOR]+nsectors; fdc.reg[SECTOR]++)
 		for(fdc.position=0; byte=sd.read())!=-1 && fdc.position < blocksize; fdc.position++)
 		{
+			if ((fdc.position==0) && (byte==0xF8))		// Deleted block
+				fdc.reg[STATUS] &= FDC_ST_DELETED;
 			fdc.reg[STATUS] &= ~FDC_ST_RECNFND;		// Reset RECNFND
 			if (fdc.cmdtype == FDC_CMD_RD_TRK) crc.compute(fdc.reg[DATA]);
 			send_qx1(fdc.reg[DATA]);
@@ -518,8 +520,8 @@ PLUG HERE THE BEHAVIOR IF DATA ADDRESS MARK ON DISK (first byte) IS SET TO DELET
 		{
 			if (fdc.cmdtype == FDC_CMD_RD_TRK)		// We read to extra bytes (CRC)
 			{
-				crc.checkmsb(sd.read());
-				crc.checklsb(sd.read());
+				if (! crc.check(sd.read(),1)) fdc.reg[STATUS] &= FDC_CRC_ERROR;	// MSB
+				if (! crc.check(sd.read(),0)) fdc.reg[STATUS] &= FDC_CRC_ERROR;	// LSB
 				send_qx1(crc.msb());
 				send_qx1(crc.lsb());
 			}
