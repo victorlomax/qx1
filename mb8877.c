@@ -7,7 +7,9 @@ References
 	Arduino Mini: http://arduino.cc/en/Main/ArduinoBoardMini
 	SD library: http://www.roland-riegel.de/sd-reader/index.html
 	MicroFAT: http://arduinonut.blogspot.ca/2008/04/ufat.html
+	CRC: http://stackoverflow.com/questions/17196743/crc-ccitt-implementation
 	mb8877a: from RetroPC ver 2006.12.06 by Takeda.Toshiya, http://homepage3.nifty.com/takeda-toshiya/
+	Fujitsu MB8877a datasheet: map.grauw.nl/resources/disk/fujitsu_mb8876a.pdf
 */
 
 // ----------------------------------------------------------------------------
@@ -21,7 +23,6 @@ References
 
 #include "mb8877.h"
 #include "crc.h"
-
 #include <SD.h>
 #include <SdFat.h>
 
@@ -316,22 +317,24 @@ void	MB8877::decode_command()
 		scanDirectory(fdc.disk);
 		if (fdc.reg[STATUS] & FDC_ST_NOTREADY) return;	// Still no SD
 	}
-
+	
+	fdc.cmdtype = 0;	// Reset current command
+	
 	switch(fdc.reg[CMD] & 0xf0) {			// Decode which command to execute
 	// type I
-		case 0x00: cmd_restore(); break;
-		case 0x10: cmd_seek(); break;
+		case 0x00: cmd_restore(FDC_CMD_RESTORE); break;
+		case 0x10: cmd_seek(FDC_CMD_SEEK); break;
 		case 0x20: cmd_step(0); break;
 		case 0x30: cmd_step(1); break;
-		case 0x40: cmd_stepin(0); break;
-		case 0x50: cmd_stepin(1); break;
-		case 0x60: cmd_stepout(0); break;
-		case 0x70: cmd_stepout(1); break;
+		case 0x40: cmd_stepin(FDC_CMD_STEP_IN, 0); break;
+		case 0x50: cmd_stepin(FDC_CMD_STEP_IN, 1); break;
+		case 0x60: cmd_stepout(FDC_CMD_STEP_OUT, 0); break;
+		case 0x70: cmd_stepout(FDC_CMD_STEP_OUT, 1); break;
 	// type II
-		case 0x80: fdc.cmdtype = 0; cmd_readdata(false); break;
-		case 0x90: fdc.cmdtype = 0; cmd_readdata(true); break;
-		case 0xa0: fdc.cmdtype = 0; cmd_writedata(false); break;
-		case 0xb0: fdc.cmdtype = 0; cmd_writedata(true); break;
+		case 0x80: cmd_readdata(FDC_CMD_RD_SEC); break;
+		case 0x90: cmd_readdata(FDC_CMD_RD_MSEC); break;
+		case 0xa0: cmd_writedata(FDC_CMD_WR_SEC); break;
+		case 0xb0: cmd_writedata(FDC_CMD_WR_MSEC); break;
 	// type III
 		case 0xc0: cmd_readaddr(); break;
 		case 0xe0: cmd_readtrack(); break;
@@ -346,12 +349,12 @@ void	MB8877::decode_command()
 // ----------------------------------------------------------------------------
 // Type I command: RESTORE
 // ----------------------------------------------------------------------------
-void MB8877::cmd_restore()
+void MB8877::cmd_restore(int cmd)
 {
 #ifdef FDC_DEBUG
 	display(" I  RESTORE");
 #endif
-	fdc.cmdtype = FDC_CMD_RESTORE;
+	fdc.cmdtype = cmd;
 	fdc.vector = FDC_SEEK_FORWARD;
 
 	fdc.reg[STATUS] = 0x00;
@@ -380,12 +383,12 @@ void MB8877::cmd_restore()
 // Type I command: SEEK
 // ----------------------------------------------------------------------------
 // fdc.reg[DATA] contains the track we want to reach
-void MB8877::cmd_seek()
+void MB8877::cmd_seek(int cmd)
 {
 #ifdef FDC_DEBUG
 	display(" I  SEEK");
 #endif
-	fdc.cmdtype = FDC_CMD_SEEK;			// Set command type
+	fdc.cmdtype = cmd;			// Set command type
 	fdc.vector = !(fdc.reg[DATA] > fdc.track);	// Determine seek vector
 
 	fdc.reg[STATUS] = 0x00;
@@ -397,7 +400,7 @@ void MB8877::cmd_seek()
 	else
 	{
 		// Set track register
-		fdc.reg[TRACK] = fdc.track = (fdc.reg[DATA]>FDC_TRACKS)?FDC_TRACKS:(registers[DATA] < 0)?0:registers[DATA];
+		fdc.reg[TRACK] = fdc.track = (fdc.reg[DATA]>FDC_TRACKS)?FDC_TRACKS:(fdc.reg[DATA] < 0)?0:fdc.reg[DATA];
 		fdc.reg[STATUS] = (fdc.reg[TRACK] == 0) ? FDC_ST_HEADENG : FDC_ST_HEADENG|FDC_ST_TRACK00;
 	}
 }
@@ -410,18 +413,18 @@ void MB8877::cmd_step(byte track_update)
 #ifdef FDC_DEBUG
 	display(" I  STEP");
 #endif
-	if (fdc.vector) cmd_stepout(track_update) else cmd_stepin(track_update);
+	if (fdc.vector) cmd_stepout(FDC_CMD_STEP_OUT, track_update) else cmd_stepin(FDC_CMD_STEP_IN, track_update);
 }
 
 // ----------------------------------------------------------------------------
 // Type I command: STEP-IN
 // ----------------------------------------------------------------------------
-void MB8877::cmd_stepin(byte track_update)
+void MB8877::cmd_stepin(int cmd, byte track_update)
 {
 #ifdef FDC_DEBUG
 	display(" I  STEP_IN");
 #endif
-	fdc.cmdtype = FDC_CMD_STEP_IN;		// Set command type
+	fdc.cmdtype = cmd;		// Set command type
 
 	fdc.vector = false;			// Reset seek vector
 	fdc.reg[STATUS] = 0x00;
@@ -442,12 +445,12 @@ void MB8877::cmd_stepin(byte track_update)
 // ----------------------------------------------------------------------------
 // Type I command: STEP-OUT
 // ----------------------------------------------------------------------------
-void MB8877::cmd_stepout(byte track_update)
+void MB8877::cmd_stepout(int cmd, byte track_update)
 {
 #ifdef FDC_DEBUG
 	display(" I  STEP_OUT");
 #endif
-	fdc.cmdtype = FDC_CMD_STEP_OUT;		// Set command type
+	fdc.cmdtype = cmd;		// Set command type
 
 	fdc.vector = true;			// Set seek vector
 	fdc.reg[STATUS] = 0x00;
@@ -468,7 +471,7 @@ void MB8877::cmd_stepout(byte track_update)
 // ----------------------------------------------------------------------------
 // Type II command: READ-DATA
 // ----------------------------------------------------------------------------
-void MB8877::cmd_readdata(byte multiple)
+void MB8877::cmd_readdata(int cmd, CRC *crc)
 {
 	int16_t	byte,		// the byte we'll read
 		blocksize,	// # bytes to read / sector
@@ -479,21 +482,18 @@ void MB8877::cmd_readdata(byte multiple)
 
 	fdc.reg[STATUS] = FDC_ST_BUSY|FDC_ST_RECNFND;		// Busy and no Record found yet
 
-	// If CMDTYPE is not FDC_CMD_RD_TRK, we must compare the side. If CMDTYPE is already set, the side comparison has already been done.
-	if ( (fdc.cmdtype != FDC_CMD_RD_TRK) && ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[CMD] & 0x08) != fdc.side)) ) return;
-	fdc.cmdtype = (fdc.cmdtype != FDC_CMD_RD_TRK) && (fdc.reg[CMD] & FDC_FLAG_MULTIRECORD) ? FDC_CMD_RD_MSEC : FDC_CMD_RD_SEC;
-
-	// Calculate the number of sectors we will have to read
-	if (fdc.reg[CMD] & FDC_FLAG_MULTIRECORD)
+	// If CMDTYPE is not set, we must compare the side. If CMDTYPE is already set, the side comparison has already been done.
+	if (fdc.cmdtype == 0)
 	{
-		if(fdc.cmdtype == 0) fdc.cmdtype = FDC_CMD_RD_MSEC;
-		nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1) - fdc.reg[SECTOR];
+		if ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[CMD] & 0x08) != fdc.side)) return;
 	}
 	else
-	{
-		if(fdc.cmdtype == 0) fdc.cmdtype = FDC_CMD_RD_SEC;
-		nsectors = 1;
-	}
+		fdc.cmdtype = cmd;
+
+	// Calculate the number of sectors we will have to read
+	nsectors = 1;
+	if (fdc.cmdtype != FDC_CMD_RD_SEC) 
+		nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1) - fdc.reg[SECTOR];
 	blocksize = (fdc.track<80) ? FDC_SIZE_SECTOR_0 : FDC_SIZE_SECTOR_1;
 
 	// Try to set file cursor at the desired position.
@@ -509,6 +509,7 @@ PLUG HERE THE BEHAVIOR IF DATA ADDRESS MARK ON DISK (first byte) IS SET TO DELET
 		for(fdc.position=0; byte=sd.read())!=-1 && fdc.position < blocksize; fdc.position++)
 		{
 			fdc.reg[STATUS] &= ~FDC_ST_RECNFND;		// Reset RECNFND
+			if (fdc.cmdtype == FDC_CMD_RD_TRK) CRC.compute(fdc.reg[DATA]);
 			send_qx1(fdc.reg[DATA]);
 		}
 	}
