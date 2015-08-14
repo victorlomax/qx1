@@ -5,6 +5,7 @@ class CRC {
   public:
     CRC() { result[0]=result[1]=0xff; }
     void reset() { result[0]=result[1]=0xff; }
+    uchar check(uchar c, uchar b) { return (c==result[b])?true:false; }
     uchar msb() { return result[1]; }
     uchar lsb() { return result[0]; }
     void compute(uchar byte) 
