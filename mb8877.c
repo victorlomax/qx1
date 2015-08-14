@@ -344,24 +344,6 @@ void	MB8877::decode_command()
 }
 
 // ----------------------------------------------------------------------------
-//	CCITT-CRC16 calculator
-// ----------------------------------------------------------------------------
-uint crc(uint result, uchar byte) 
-{ 
-	uchar t = 8; 
-
-	result = result ^ byte << 8; 
-	do 
-	{ 
-		if (result & 0x8000) 
-			result = result << 1 ^ 0x1021; 
-		else 
-			result = result << 1; 
-	} while (--t); 
-	return result; 
-} 
-
-// ----------------------------------------------------------------------------
 // Type I command: RESTORE
 // ----------------------------------------------------------------------------
 void MB8877::cmd_restore()
@@ -497,11 +479,12 @@ void MB8877::cmd_readdata(byte multiple)
 
 	fdc.reg[STATUS] = FDC_ST_BUSY|FDC_ST_RECNFND;		// Busy and no Record found yet
 
-	// If CMDTYPE is not set, we must compare the side. If CMDTYPE is already set, the side comparison has already been done.
-	if ( (fdc.cmdtype == 0) && ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[CMD] & 0x08) != fdc.side)) ) return;
+	// If CMDTYPE is not FDC_CMD_RD_TRK, we must compare the side. If CMDTYPE is already set, the side comparison has already been done.
+	if ( (fdc.cmdtype != FDC_CMD_RD_TRK) && ((fdc.reg[CMD] & FDC_FLAG_VERIFICATION) && (fdc.reg[CMD] & 0x08) != fdc.side)) ) return;
+	fdc.cmdtype = (fdc.cmdtype != FDC_CMD_RD_TRK) && (fdc.reg[CMD] & FDC_FLAG_MULTIRECORD) ? FDC_CMD_RD_MSEC : FDC_CMD_RD_SEC;
 
 	// Calculate the number of sectors we will have to read
-	if (multiple)
+	if (fdc.reg[CMD] & FDC_FLAG_MULTIRECORD)
 	{
 		if(fdc.cmdtype == 0) fdc.cmdtype = FDC_CMD_RD_MSEC;
 		nsectors = (fdc.track<80 ? FDC_SECTOR_0 : FDC_SECTOR_1) - fdc.reg[SECTOR];
@@ -653,14 +636,14 @@ void MB8877::cmd_readaddr()
 
 void MB8877::cmd_readtrack()
 {
-	uint	_crc=0xffff;
+crc	_crc = new crc;
 
 #ifdef FDC_DEBUG
 	display("III READ_TRACK");
 #endif
 
 	// type-3 read track
-	cmdtype = FDC_CMD_RD_TRK;
+	fdc.cmdtype = FDC_CMD_RD_TRK;
 //	status = FDC_ST_DRQ | FDC_ST_BUSY;
 	status = FDC_ST_BUSY | FDC_ST_RECNFND;
 
