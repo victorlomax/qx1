@@ -1,11 +1,22 @@
-/*
-  Yamaha QX1 Floppy Emulator
-*/
+/* ==========================================
+  Yamaha QX1 Floppy Emulator with Arduino Mini
+
+	Francois Basquin
+
+-- History
+2015 Jan 28: v2.0	Restart working after crash
+
+-- References
+* Arduino Mini: http://arduino.cc/en/Main/ArduinoBoardMini
+* SD library: http://www.roland-riegel.de/sd-reader/index.html
+* MicroFAT: http://arduinonut.blogspot.ca/2008/04/ufat.html
+* mb8877a: from RetroPC ver 2006.12.06 by Takeda.Toshiya, http://homepage3.nifty.com/takeda-toshiya/‎
+========================================== */
 
 #ifndef _H_MB8877
 #define _H_MB8877
 
-#define FDC_DEBUG_LOG 1
+#define FDC_DEBUG
 #define drvreg 1
 
 #ifndef uchar
@@ -51,10 +62,9 @@
 #define SECTOR		2
 #define DATA		3
 #define CMD		4
-#define SIDE		5
-#define DISK		6
 
 // Flags
+#define FDC_FLAG_DAM		0x00
 #define FDC_FLAG_VERIFICATION	0x02
 #define FDC_FLAG_HEADLOAD	0x04
 #define FDC_FLAG_TRACKUPDATE	0x08
@@ -66,73 +76,124 @@
 #define	FDC_SEEK_BACKWARD	!FDC_SEEK_FORWARD
 
 // These parameters are specific to the Yamaha QX1
+//	Track format=ISOIBM_MFM_ENCODING
+//	2 sides, 160 tracks/side (779360 bytes/side)
+//	The first byte on each sector is Data Address Mark (i.e. not a data byte)
+//	zone 0 (track 0 to 79):   410000 byes (5 sectors/track, 1024+1 bytes/sector = 5125 bytes/track)
+//	zone 1 (track 80 to 159): 369360 bytes (9 sectors/track, 512+1 bytes/sector = 4617 bytes/track)
+//	1558720 bytes/disk
+
 #define FDC_DISKS		99	// Virtual disks per SD card
 #define FDC_TRACKS		160	// Tracks per disk (from Canon MF-221 datasheet)
-#define FDC_SECTORS		14	// Sectors per track
-#define FDC_BLOCK_SIZE		256	// Size of a unit data block in double density
-#define FDC_SECTOR_SIZE		258	// SECTOR_SIZE = BLOCK_SIZE + 2 bytes for CRC
-#define FDC_TRACK_SIZE		6708	// TRACK_SIZE = SECTOR_SIZE * MAX_SECTOR
+#define FDC_SIDE		779360	// Bytes per side
+#define FDC_SIZE_TRACK_0	5120	// Bytes per track, zone 0 (DAM byte excluded)
+#define FDC_SIZE_TRACK_1	4608	// Bytes per track, zone 1 ( " )
+#define FDC_SIZE_SECTOR_0	1024	// Bytes per sector, zone 0 ( " )
+#define FDC_SIZE_SECTOR_1	512	// Bytes per sector, zone 1 ( " )
+#define FDC_SECTORS_0		5	// Sectors per track, zone 0
+#define FDC_SECTORS_1		9	// Sectors per track, zone 1
 
 uchar format_tracks, format_sectors;	// These are values provided by MPU
 
-typedef struct {
-	uchar cmdtype,	// Command type
-	seektrk;	// Current track
-	bool	vector,		// Previous step direction
-		seek;		// Seek selected
-} fdc;
+// Arduino Mini pins
+#define PD0 RX
+#define PD1 TX
+#define PD2 2
+#define PD3 3
+#define PD4 4
+#define PD5 5
+#define PD6 6
+#define PD7 7
 
-uchar registers[6],	// Registers
-uint dbaddr;		// Data block address
+#define	INT0 2
 
-/*
-typedef struct {
-	char	address_mark,
-		track,
-		side,
-		sector,
-		sector_len,
-		crc[2];
-} IBM3740_ID_RECORD;
+#define PC0 ADC0
+#define PC1 ADC1
+#define FDC_IRQ ADC2
+#define FDC_DRQ ADC3
 
-typedef struct {
-	char	address_mark,
-		data[256],
-		crc[2];
-} IBM3740_DATA_RECORD;
-
-typedef struct {
-	char	gap0[95],
-		index_mark,
-		gap1[65];
-	struct {
-		IBM3740_ID_RECORD id_record;
-		char	gap2[37];
-		IBM3740_DATA_RECORD data_record;
-		char	gap3[36];
-	} data[FDC_SECTORS];
-	char	gap4[598];
-} IBM3740;
-
-IBM3740	floppydisk[FDC_TRACKS];
-*/
+#define OUTPUT 0xff
+#define OUTPUT 0xff
 
 // ------------------------------------------------
-// FDC section
-// ------------------------------------------------
+// Manage U4A (74LS139) via PORTC(0,1) to drive PORTD
+//
+//  [             PORTD                     ]  PORTC
+//  -----+----+----+----+----+----+----+-----+-------------------------
+//    DB7  DB6  DB5  DB4   -   R/W   E    -  | BUS_SELECT_LCD
+//     -    -    -    -   <<    <   >    >>  | BUS_SELECT_KEYBOARD
+//     -    -    -    -   A1   A0   /WR  /RD | BUS_SELECT_ADDRESS
+//   DAL7 DAL6 DAL5 DAL4 DAL3 DAL2 DAL1 DAL0 | BUS_SELECT_DATA
+// --------------------------------------------------------------------
+
+#define BUS_SELECT_DATA	0x00
+#define BUS_SELECT_ADDRESS	0x01
+#define BUS_SELECT_KEYBOARD	0x02
+#define BUS_SELECT_LCD	0x03
+
+class	MB8877{
+	public:
+	MB8877();
+	~MB8877();
+	void	decode_command()
+	long	locate(void);
+	void	cmd_restore();
+	void	cmd_seek();
+	void	cmd_step(int);
+	void	cmd_stepin(int);
+	void	cmd_stepout(int);
+	void	cmd_readdata(int);
+	void	cmd_writedata(int);
+	void	cmd_readaddr();
+	void	cmd_readtrack();
+	void	cmd_writetrack();
+	void	cmd_forceint();
+	private:
+	typedef struct {
+		uchar	reg[5],		// Registers
+			cmdtype,	// Command type
+			track;		// Current track (might be != reg[TRACK])
+		uint	position,	// Current position on sector
+			side		// Current side
+			disk;		// Current disk
+		bool	vector,		// Previous step direction
+			seek;		// Seek selected
+	} fdc;
+};
 
 
+/* ------------------------------------------------
+	FDC section
+------------------------------------------------
+Type	Command         b7 b6 b5 b4 b3 b2 b1 b0
+   I	Restore         0  0  0  0  h  V  r1 r0
+   I	Seek            0  0  0  1  h  V  r1 r0
+   I	Step            0  0  1  T  h  V  r1 r0
+   I	Step-In         0  1  0  T  h  V  r1 r0
+   I	Step-Out        0  1  1  T  h  V  r1 r0
+  II	Read Sector     1  0  0  m  S  E  C  0
+  II	Write Sector    1  0  1  m  S  E  C  a0
+ III	Read Address    1  1  0  0  0  E  0  0
+ III	Read Track      1  1  1  0  0  E  0  0
+ III	Write Track     1  1  1  1  0  E  0  0        
+  IV	Force Interrupt 1  1  0  1  i3 i2 i1 i0 	
 
-// Go one step ahead or forward
-void fdc_cmd_step(int _step)
-{
-  fdc.cmdtype = FDC_CMD_TYPE1;
-  fdc.statreg = FDC_ST_HEADENG | FDC_ST_BUSY;
-  fdc.vector = _step;
-  fdc.trkreg = (fdc.trkreg > FDC_TRACKS) ? FDC_TRACKS : (fdc.trkreg < 0) ? 0 : fdc.trkreg+fdc.vector;
-  dbaddr=fdc.trkreg*FDC_TRACK_SIZE;
-  fdc_raiseinterrupt();
-}
+    r1 r0  Stepping Motor Rate
+       V      Track Number Verify Flag (0: no verify, 1: verify on dest track)
+       h      Head Load Flag (1: load head at beginning, 0: unload head)
+       T      Track Update Flag (0: no update, 1: update Track Register)
+       a0     Data Address Mark (0: FB, 1: F8 (deleted DAM))
+       C      Side Compare Flag (0: disable side compare, 1: enable side comp)
+       E      15 ms delay (0: no 15ms delay, 1: 15 ms delay)
+       S      Side Compare Flag (0: compare for side 0, 1: compare for side 1)
+       m      Multiple Record Flag (0: single record, 1: multiple records)
+           i3 i2 i1 i0    Interrupt Condition Flags
+              i3-i0 = 0 Terminate with no interrupt (INTRQ)
+                    i3 = 1 Immediate interrupt, requires a reset
+                    i2 = 1 Index pulse
+                    i1 = 1 Ready to not ready transition
+                    i0 = 1 Not ready to ready transition
+------------------------------------------------ */
 
 // Read data
 void fdc_cmd_readdata()
@@ -164,41 +225,5 @@ void fdc_cmd_readtrack() {
 void fdc_cmd_writetrack() {
 	
 }
-void fdc_cmd_forceint() {; }
 
-void fdc_cmd() {
-#ifdef FDC_DEBUG_LOG
-  const char *cmdstr[0x10] = {
-    "Rest", "Seek", "Step", "Step",
-    "StpI", "StpI", "StpO", "StpO",
-    "RDat", "RDat", "RDat", "WDat",
-    "RAdd", "Int ", "RTrk", "WTrk"};
-  lcd.setCursor(19, 0);
-  lcd.print(cmdstr[fdc.cmdreg >> 4]);
-  // emu->out_debug(_T("FDC\tCMD=%2xh (%s) DATA=%2xh DRV=%d TRK=%3d SIDE=%d SEC=%2d\n"), cmdreg, cmdstr[cmdreg >> 4], datareg, drvreg, trkreg, sidereg, secreg);
-#endif
-  switch(fdc.cmdreg & 0xf0) {
-	// type-1
-	case 0x00: fdc_cmd_restore(); break;
-	case 0x10: fdc_cmd_seek(); break;
-	case 0x20:
-	case 0x30: fdc_cmd_step(fdc_vector); break;
-	case 0x40:
-	case 0x50: fdc_cmd_step(-1); break;
-	case 0x60:
-	case 0x70: fdc_cmd_step(1); break;
-	// type-2
-	case 0x80:
-	case 0x90: fdc_cmd_readdata(); break;
-	case 0xa0:
-	case 0xb0: fdc_cmd_writedata(); break;
-	// type-3
-	case 0xc0: fdc_cmd_readaddr(); break;
-	case 0xe0: fdc_cmd_readtrack(); break;
-	case 0xf0: fdc_cmd_writetrack(); break;
-	// type-4
-	case 0xd0: fdc_cmd_forceint(); break;
-	default: break;
-  }
-}
 #endif
