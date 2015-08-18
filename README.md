@@ -16,9 +16,9 @@ Virtual Diskette File Format
 ...
 0xc823e [ Block 799 (1024 bytes) ] = Side 1, Track 79, Sector 4
 0xc863e CRC16 (2 bytes)
+// Track 80 to 159: 9 sector / track, 512 (data) + 2 (crc) bytes / sector
 0xc8640 [ Block 800 (512 bytes) ] = Side 0, Track 80, Sector 0
 0xc8840 CRC16 (2 bytes)
-// Track 80 to 135: 9 sector / track, 512 (data) + 2 (crc) bytes / sector
 0xc8842 [ Block 801 (512 bytes) ] = Side 0, Track 80, Sector 1
 ...
-[ Block 809 (512 bytes) ] = Side 1, Track 80, Sector 8
+0x1219ce [ Block 809 (512 bytes) ] = Side 1, Track 159, Sector 8
