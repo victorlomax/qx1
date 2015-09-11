@@ -977,4 +977,4 @@ void loop()
 		case 0x0a: PORTD = fdc.reg[SECTOR]; break;
 		case 0x0e: PORTD = fdc.reg[DATA]; break;
 	}
-}
+} 
