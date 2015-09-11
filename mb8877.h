@@ -77,19 +77,20 @@
 
 // These parameters are specific to the Yamaha QX1
 //	Track format=ISOIBM_MFM_ENCODING
-//	2 sides, 160 tracks/side (779360 bytes/side)
+//	2 sides, 160 tracks/side (775072 bytes/side)
 //	The first byte on each sector is Data Address Mark (i.e. not a data byte)
-//	zone 0 (track 0 to 79):   410000 byes (5 sectors/track, 1024+1 bytes/sector = 5125 bytes/track)
-//	zone 1 (track 80 to 159): 369360 bytes (9 sectors/track, 512+1 bytes/sector = 4617 bytes/track)
-//	1558720 bytes/disk
+//	zone 0 (track 0 to 79):   819200 bytes (5 sectors/track * 2 sides, 1024 bytes/sector = 10240 bytes/track)
+//	zone 1 (track 80 to 159): 728064 bytes (9 sectors/track * 2 sides, 512 bytes/sector = 9216 bytes/track)
+//	zone CRC: 2444 bytes (2 bytes / sector)
+//	1550144 bytes/disk
 
 #define FDC_DISKS		99	// Virtual disks per SD card
 #define FDC_TRACKS		160	// Tracks per disk (from Canon MF-221 datasheet)
-#define FDC_SIDE		779360	// Bytes per side
-#define FDC_SIZE_TRACK_0	5120	// Bytes per track, zone 0 (DAM byte excluded)
-#define FDC_SIZE_TRACK_1	4608	// Bytes per track, zone 1 ( " )
-#define FDC_SIZE_SECTOR_0	1024	// Bytes per sector, zone 0 ( " )
-#define FDC_SIZE_SECTOR_1	512	// Bytes per sector, zone 1 ( " )
+#define FDC_SIDE		775072	// Bytes per side
+#define FDC_SIZE_TRACK_0	10240	// Bytes per track, zone 0
+#define FDC_SIZE_TRACK_1	9216	// Bytes per track, zone 1
+#define FDC_SIZE_SECTOR_0	1024	// Bytes per sector, zone 0
+#define FDC_SIZE_SECTOR_1	512	// Bytes per sector, zone 1
 #define FDC_SECTORS_0		5	// Sectors per track, zone 0
 #define FDC_SECTORS_1		9	// Sectors per track, zone 1
 
