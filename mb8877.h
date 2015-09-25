@@ -152,6 +152,17 @@ class	MB8877{
 	private:
 	typedef struct {
 		uchar	reg[5],		// Registers
+			control,	// FDC emulation control:
+			// Bit 7  6  5  4  3  2  1  0
+			//     V  S  -  -  I3 I2 I1 I0
+			// V = vector (previous step direction)
+			// S = seek (seek is selected)
+			// I3-0 = interrupt request mask, according to the following
+	// I3: issue an interrupt now. This bit can only be reset with another "Force interrupt" command.
+	// I2: issue an interrupt at the next index pulse.
+	// I1: issue an interrupt at the next ready to not-ready transition of the READY pin.
+	// I0: issue an interrupt at the next not-ready to ready transition of the READY pin.
+	// (If I0-I3 are 0: don't issue any interrupt, but still abort the current command).
 			cmdtype,	// Command type
 			track;		// Current track (might be != reg[TRACK])
 		uint	position,	// Current position on sector
