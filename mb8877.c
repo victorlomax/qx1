@@ -358,6 +358,15 @@ void MB8877::cmd_restore(int cmd)
 	fdc.vector = FDC_SEEK_FORWARD;
 
 	fdc.reg[STATUS] = 0x00;
+	
+// I3: issue an interrupt now. This bit can only be reset with another "Force interrupt" command.
+// I2: issue an interrupt at the next index pulse.
+// I1: issue an interrupt at the next ready to not-ready transition of the READY pin.
+// I0: issue an interrupt at the next not-ready to ready transition of the READY pin.
+// (If I0-I3 are 0: don't issue any interrupt, but still abort the current command).
+
+	// force interrupt if bit0-bit3 is high
+//	if(cmdreg & 0x0f) digitalWrite(FDC_IRQ, HIGH);
 
 	sprintf(filename,"DISK_%03dQX1",fdc.disk);
 	sdcard=sd.open(filename,2);
