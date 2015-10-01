@@ -718,6 +718,7 @@ void MB8877::cmd_forceint()
 	if(fdc.cmdtype == 0 || fdc.cmdtype == 4) {
 		status = 0;
 		cmdtype = FDC_CMD_TYPE1;
+		fdc.
 	}
 	fdc.reg[STATUS] &= ~FDC_ST_BUSY;
 	sd.close(sdcard);
