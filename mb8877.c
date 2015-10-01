@@ -718,13 +718,13 @@ void MB8877::cmd_forceint()
 	if(fdc.cmdtype == 0 || fdc.cmdtype == 4) {
 		status = 0;
 		cmdtype = FDC_CMD_TYPE1;
-		fdc.
+		fdc.control ^= (cmdreg & 0x0f);
 	}
 	fdc.reg[STATUS] &= ~FDC_ST_BUSY;
 	sd.close(sdcard);
 	
 	// force interrupt if bit0-bit3 is high
-	if(cmdreg & 0x0f) digitalWrite(FDC_IRQ, HIGH);
+	if(fdc.control & FDC_INT_NOW) digitalWrite(FDC_IRQ, HIGH);
 }
 
 // ----------------------------------------------------------------------------
