@@ -57,8 +57,8 @@
 #define FDC_CMD_TYPE4		0x80
 
 // Interrupt masks
-#define FDC_INT_NR2R		0x01
-#define FDC_INT_R2NR		0x02
+#define FDC_INT_NR2R		0x01	// Not used
+#define FDC_INT_R2NR		0x02	// Not used
 #define FDC_INT_PULSE		0x04
 #define FDC_INT_NOW		0x08
 
