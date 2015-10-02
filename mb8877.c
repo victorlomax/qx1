@@ -723,7 +723,6 @@ void MB8877::cmd_forceint()
 	fdc.reg[STATUS] &= ~FDC_ST_BUSY;
 	sd.close(sdcard);
 	
-	// force interrupt if bit0-bit3 is high
 	if(fdc.control & FDC_INT_NOW) digitalWrite(FDC_IRQ, HIGH);
 }
 
