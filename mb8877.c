@@ -447,7 +447,7 @@ void MB8877::cmd_stepin(int cmd, byte track_update)
 		fdc.track++;				// Next track
 		if(fdc.track>FDC_TRACKS) fdc.track=FDC_TRACKS;
 		if(track_update) fdc.reg[TRACK] = fdc.track;
-		fdc.reg[STATUS] |= (fdc.reg[CMD] & FDC_FLAG_HEADENG)?FDC_ST_HEADENG:0;
+		fdc.reg[STATUS] |= (fdc.reg[CMD] & FDC_FLAG_HEADLOAD)?FDC_ST_HEADENG:0;
 	}
 }
 
@@ -473,7 +473,7 @@ void MB8877::cmd_stepout(int cmd, byte track_update)
 		fdc.track--;			// Previous track
 		if(fdc.track<0) { fdc.track=0; fdc.reg[STATUS] = FDC_ST_TRACK0; }
 		if(track_update) fdc.reg[TRACK] = fdc.track;
-		fdc.reg[STATUS] |= (fdc.reg[CMD] & FDC_FLAG_HEADENG)?FDC_ST_HEADENG:0;
+		fdc.reg[STATUS] |= (fdc.reg[CMD] & FDC_FLAG_HEADLOAD)?FDC_ST_HEADENG:0;
 	}
 }
 
