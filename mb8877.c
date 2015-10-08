@@ -419,10 +419,14 @@ void MB8877::cmd_seek(int cmd)
 // ----------------------------------------------------------------------------
 void MB8877::cmd_step(byte track_update)
 {
+	byte	inc;
 #ifdef FDC_DEBUG
 	display(" I  STEP");
 #endif
-	if (fdc.vector) cmd_stepout(FDC_CMD_STEP_OUT, track_update) else cmd_stepin(FDC_CMD_STEP_IN, track_update);
+	if (fdc.vector)
+	{
+		inc=-1;
+		cmd_stepout(FDC_CMD_STEP_OUT, track_update) else cmd_stepin(FDC_CMD_STEP_IN, track_update);
 }
 
 // ----------------------------------------------------------------------------
