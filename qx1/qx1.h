@@ -1,3 +1,5 @@
+#include <events.h>
+
 /* ==========================================
   Yamaha QX1 Floppy Emulator with Arduino Mini
 
@@ -34,5 +36,45 @@
 #define FDC_SIZE_SECTOR_1	512	// Bytes per sector, zone 1
 #define FDC_SECTORS_0		5	// Sectors per track, zone 0
 #define FDC_SECTORS_1		9	// Sectors per track, zone 1
+
+#define FDC_FRM_MAXSECTOR  9
+#define FDC_FRM_BLOCKSIZE 512
+
+// ------------------------------------------------
+// Manage U4A (74LS139) via PORTC(0,1) to drive PORTD
+//
+//  [  PORTC  ][             PORTD                     ]
+//  [-C1-+-C0-][----+----+----+----+----+----+----+----]
+//  | 1     1 ||DB7  DB6  DB5  DB4   -   R/W   E    -  | BUS_SELECT_LCD
+//  | 1     0 || -    -    -    -   <<    <   >    >>  | BUS_SELECT_KEYBOARD
+//  | 0     1 || -    -    -    -   A1   A0   /WR  /RD | BUS_SELECT_ADDRESS
+//  | 0     0 ||DAL7 DAL6 DAL5 DAL4 DAL3 DAL2 DAL1 DAL0| BUS_SELECT_DATA
+// --------------------------------------------------------------------
+
+#define BUS_SELECT_DATA 0x00
+#define BUS_SELECT_ADDRESS  0x01
+#define BUS_SELECT_KEYBOARD 0x02
+#define BUS_SELECT_LCD  0x03
+
+// Arduino Mini pins
+#define PD0 RX
+#define PD1 TX
+#define PD2 2
+#define PD3 3
+#define PD4 4
+#define PD5 5
+#define PD6 6
+#define PD7 7
+
+#define ADC0  14
+#define ADC1  15
+#define ADC2  16
+#define ADC3  17
+
+#define PC0 ADC0
+#define PC1 ADC1
+
+#define FDC_IRQ ADC2
+#define FDC_DRQ ADC3
 
 #endif
