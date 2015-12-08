@@ -22,7 +22,7 @@ References
 #include "mb8877.h"
 #include "qx1.h"
 #include "crc.h"
-#include <SD.h>
+
 
 #ifndef _H_SDCARD
 #include "sdcard.h"
@@ -63,23 +63,18 @@ extern File      disk;    // Current virtual disk
 extern dir_t     direntry;
 
 
-// ----------------------------------------------------------------------------
-// DECLARE FUNCTION
-// ----------------------------------------------------------------------------
-void readsector();	
-void send_qx1(unsigned char);
-void read_qx1();
+
 
 // ----------------------------------------------------------------------------
 // Interrupt Management
 // ----------------------------------------------------------------------------
-volatile int Interrupt = false;	// When QX1 pin /RD goes low, Interrupt goes true
+volatile int interrupt = false;	// When QX1 pin /RD goes low, Interrupt goes true
 
 ISR(INT0_vect) {
 	// check the value again - since it takes some time to
 	// activate the interrupt routine, we get a clear signal.
 	qx1bus = digitalRead(INT0);
-	Interrupt=true;
+	interrupt=true;
 }
 
 
@@ -171,7 +166,7 @@ void MB8877::vdisk()
 void MB8877::cmd_restore(int cmd)
 {
 #ifdef FDC_DEBUG
-	display(" I  RESTORE");
+	fdcdisplay((char*)" I  RESTORE");
 #endif
 	fdc.cmdtype = cmd;
 	fdc.vector = FDC_SEEK_FORWARD;
@@ -214,7 +209,7 @@ void MB8877::cmd_restore(int cmd)
 void MB8877::cmd_seek(char cmd)
 {
 #ifdef FDC_DEBUG
-	display(" I  SEEK");
+	fdcdisplay((char*)" I  SEEK");
 #endif
 	fdc.cmdtype = cmd;			// Set command type
 	fdc.vector = !(reg[DATA] > fdc.track);	// Determine seek vector
@@ -239,7 +234,7 @@ void MB8877::cmd_seek(char cmd)
 void MB8877::cmd_step(bool track_update)
 {
 #ifdef FDC_DEBUG
-	display(" I  STEP");
+	fdcdisplay((char*)" I  STEP");
 #endif
 	if (fdc.vector)
 		cmd_step(FDC_CMD_STEP_OUT, track_update);
@@ -264,7 +259,7 @@ void MB8877::cmd_step(char cmd, bool track_update)
 	if(cmd==FDC_CMD_STEP_IN)
   {
 #ifdef FDC_DEBUG
-    display(" I  STEP_IN");
+    fdcdisplay((char*)" I  STEP_IN");
 #endif
     fdc.vector = false;      // Reset seek vector
     fdc.track++;				// Next track
@@ -275,7 +270,7 @@ void MB8877::cmd_step(char cmd, bool track_update)
  else
  {
 #ifdef FDC_DEBUG
-    display(" I  STEP_OUT");
+    fdcdisplay((char*)" I  STEP_OUT");
 #endif
     fdc.vector = false;      // Reset seek vector
     fdc.track--;            // Previous track
@@ -295,7 +290,7 @@ void MB8877::cmd_readdata(char cmd)
 		blocksize,	// # bytes to read / sector
 		nsectors;	// # sectors to read
 #ifdef FDC_DEBUG
-	display(" II READ_DATA");
+	fdcdisplay((char*)" II READ_DATA");
 #endif
 
 	reg[STATUS] = FDC_ST_BUSY|FDC_ST_RECNFND;		// Busy and no Record found yet
@@ -358,7 +353,7 @@ void MB8877::cmd_writedata(char cmd)
 		blocksize,	// # bytes / sector
 		nsectors;	// # sectors to write
 #ifdef FDC_DEBUG
-	display(" II WRITE_DATA");
+	fdcdisplay((char*)" II WRITE_DATA");
 #endif
 
 	// Calculate the number of sectors we will have to write
@@ -425,7 +420,7 @@ void MB8877::cmd_readaddr(char cmd)
 {
 	CRC *crc = new CRC;
 #ifdef FDC_DEBUG
-	display("III READ_ADDR");
+	fdcdisplay((char*)"III READ_ADDR");
 #endif
   fdc.cmdtype = cmd;
 
@@ -463,7 +458,7 @@ void MB8877::cmd_readtrack(char cmd)
 	uint	i;
 
 #ifdef FDC_DEBUG
-	display("III READ_TRACK");
+	fdcdisplay((char*)"III READ_TRACK");
 #endif
 
 	// type-3 read track
@@ -503,7 +498,7 @@ void MB8877::cmd_readtrack(char cmd)
 void MB8877::cmd_writetrack(char cmd)
 {
 #ifdef FDC_DEBUG
-	display("III WRITE_TRACK");
+	fdcdisplay((char*)"III WRITE_TRACK");
 #endif
 	// type-3 write track
 	fdc.cmdtype = cmd;
@@ -518,7 +513,7 @@ void MB8877::cmd_writetrack(char cmd)
 void MB8877::cmd_forceint(char cmd)
 {
 #ifdef FDC_DEBUG
-	display(" IV FORCE_INT");
+	fdcdisplay((char*)" IV FORCE_INT");
 #endif
 	if(fdc.cmdtype == 0 || fdc.cmdtype == 4) {
 		fdc.cmdtype = cmd;

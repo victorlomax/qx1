@@ -159,5 +159,7 @@ Type	Command         b7 b6 b5 b4 b3 b2 b1 b0
 #define EVENT_MULTI2    5
 #define EVENT_LOST    6
 
+void scanSD();
+
 #endif
 

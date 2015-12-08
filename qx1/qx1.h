@@ -1,5 +1,3 @@
-#include <events.h>
-
 /* ==========================================
   Yamaha QX1 Floppy Emulator with Arduino Mini
 
@@ -17,6 +15,7 @@
 
 #ifndef _H_QX1
 #define _H_QX1
+#endif
 
 // These parameters are specific to the Yamaha QX1
 //	Track format=ISOIBM_MFM_ENCODING
@@ -57,14 +56,14 @@
 #define BUS_SELECT_LCD  0x03
 
 // Arduino Mini pins
-#define PD0 RX
-#define PD1 TX
-#define PD2 2
-#define PD3 3
-#define PD4 4
-#define PD5 5
-#define PD6 6
-#define PD7 7
+//#define PD0 RX
+//#define PD1 TX
+//#define PD2 2
+//#define PD3 3
+//#define PD4 4
+//#define PD5 5
+//#define PD6 6
+//#define PD7 7
 
 #define ADC0  14
 #define ADC1  15
@@ -77,4 +76,14 @@
 #define FDC_IRQ ADC2
 #define FDC_DRQ ADC3
 
-#endif
+// ----------------------------------------------------------------------------
+// DECLARE FUNCTION
+// ----------------------------------------------------------------------------
+void readsector();  
+void send_qx1(unsigned char);
+void read_qx1();
+void fdcdisplay(char*);
+
+#define TRUE  1
+#define FALSE !TRUE
+

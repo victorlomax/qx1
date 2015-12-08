@@ -15,6 +15,14 @@ References
 #ifndef _H_SDCARD
 #define _H_SDCARD
 
+#include <SD.h>
+
 int scanDirectory(int);
+
+Sd2Card   card;
+SdVolume  volume;
+//SdFile    root;
+File      droot;    // Directory root
+File      disk;    // Current virtual disk
 
 #endif
