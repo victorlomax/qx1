@@ -50,7 +50,10 @@ void setup() {
   DDRD = PORT_INPUT;  // Set port D as input
   DDRC |= 0x0f;       // Set port C (0-3) as output
   qx1bus=0;           // no data on QX1 bus
-
+  cli(); // Disable interrupts
+	PCICR|=0x04; // Enable Port D interrupt
+	PCMKS2|=0x0c; // Interrupts available on INT0 (PCINT18) and INT1 (PCINT19)
+	sei(); //Enable interrupts
   Serial.println("01 Card init..");
 
   pinMode(SD_CHIP_SELECT_PIN, OUTPUT);
@@ -101,6 +104,15 @@ void loop()
 // ---- DEBUG
 }
 
+ISR(PC0INT_vect) // INTO = Read request
+{
+	tbd
+}
+
+ISR(PC1INT_vect) // INT1 = Write request
+{
+	tbd
+}
 void fdcdisplay(char *command)
 {
   const char *cmdstr[0x10] = {
