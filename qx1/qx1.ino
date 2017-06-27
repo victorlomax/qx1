@@ -10,6 +10,7 @@ References
 	CRC: http://stackoverflow.com/questions/17196743/crc-ccitt-implementation
 	mb8877a: from RetroPC ver 2006.12.06 by Takeda.Toshiya, http://homepage3.nifty.com/takeda-toshiya/
 	Fujitsu MB8877a datasheet: map.grauw.nl/resources/disk/fujitsu_mb8876a.pdf
+	Interrupts: https://thewanderingengineer.com/2014/08/11/arduino-pin-change-interrupts/
 */
 #define FDC_DEBUG
 
