@@ -51,10 +51,7 @@ void setup() {
   DDRD = PORT_INPUT;  // Set port D as input
   DDRC |= 0x0f;       // Set port C (0-3) as output
   qx1bus=0;           // no data on QX1 bus
-  cli(); // Disable interrupts
-	PCICR|=0x04; // Enable Port D interrupt
-	PCMKS2|=0x0c; // Interrupts available on INT0 (PCINT18) and INT1 (PCINT19)
-	sei(); //Enable interrupts
+
   Serial.println("01 Card init..");
 
   pinMode(SD_CHIP_SELECT_PIN, OUTPUT);
@@ -64,27 +61,50 @@ void setup() {
   scanDirectory(1);  // ... scan the directory
 }
 
+void	bus_request()
+{
+	qx1bus = PORTD;
+}
+
+void	serve_request(int s, int r)
+{
+	detachInterrupt(digitalPinToInterrupt(2));
+	detachInterrupt(digitalPinToInterrupt(3));
+
+	PORTC &= 0xf0;
+	PORTC |= BUS_SELECT_DATA;
+
+	if (s==0)
+		mb8877.reg[r] = PORTD;
+	else
+		PORTD = mb8877.reg[r];
+
+	digitalWrite(FDC_DRQ, HIGH);	// Data present
+	digitalWrite(FDC_IRQ, HIGH);	// Command completed
+
+	PORTC &= 0xf0;
+	PORTC |= BUS_SELECT_ADDRESS;
+
+	attachInterrupt(digitalPinToInterrupt(2),bus_request, LOW);
+	attachInterrupt(digitalPinToInterrupt(3),bus_request, LOW);
+}
+
 void loop()
 {
   int lock=FALSE;
   int incomingByte; // DEBUG
 
-
-// - Prepare interrupts; on falling edge, we'll call getNewCommand
-  attachInterrupt(0, read_qx1, FALLING);
-
-// Global Enable INT0 interrupt
-  //GICR |= ( 1 << INT0);   ///////// A corriger, GICR est sur le Mega8, pas sur le 328
-  EIMSK |= ( 1 << INT0);
-// Signal change triggers interrupt
-  MCUCR |= ( 1 << ISC00);
-  MCUCR |= ( 0 << ISC01);
-
-  digitalWrite(FDC_DRQ, HIGH);  // Reset DRQ interrupt
-  digitalWrite(FDC_IRQ, HIGH);
-
-  PORTC &= 0xf0;
-  PORTC |= BUS_SELECT_ADDRESS;
+	switch(qx1bus)
+	{
+		case 0x04: serve_request(0, STATUS); break;
+		case 0x05: serve_request(0, TRACK); break;
+		case 0x06: serve_request(0, SECTOR); break;
+		case 0x07: serve_request(0, DATA); break;
+		case 0x08: serve_request(1, COMMAND); break;
+		case 0x09: serve_request(1, TRACK); break;
+		case 0x0a: serve_request(1, SECTOR); break;
+		case 0x0b: serve_request(1, DATA); break;
+	}
 
 // DEBUG ----
   if (Serial.available() > 0) {
@@ -105,15 +125,6 @@ void loop()
 // ---- DEBUG
 }
 
-ISR(PC0INT_vect) // INTO = Read request
-{
-	tbd
-}
-
-ISR(PC1INT_vect) // INT1 = Write request
-{
-	tbd
-}
 void fdcdisplay(char *command)
 {
   const char *cmdstr[0x10] = {
